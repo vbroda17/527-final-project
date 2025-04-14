@@ -6,7 +6,7 @@ import argparse, random
 import numpy as np
 from dataclasses import dataclass
 from physics import Planet, gravity_acc
-from viz import plot_paths
+from viz import plot_scene
 
 # ---------- config ----------
 @dataclass
@@ -146,8 +146,9 @@ def main():
 
     print(f"Best cost: {cost(best,cfg):.3e}")
     if args.show:
-        plot_paths(PLANETS, swarm, best_path=best,
-                   title=f'ABC – best J={cost(best,cfg):.2e}')
+        plot_scene(PLANETS, best, all_paths=swarm,
+                title=f'ABC – best J={cost(best,cfg):.2e}')
+
 
 if __name__ == '__main__':
     main()
