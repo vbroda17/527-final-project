@@ -1,154 +1,195 @@
-#!/usr/bin/env python3
-"""
-Toy Artificial Bee Colony for 2‑D inter‑planetary hop
-"""
 import argparse, random
-import numpy as np
 from dataclasses import dataclass
-from physics import Planet, gravity_acc
-from viz import plot_scene
+import numpy as np
 
-# ---------- config ----------
+from physics import Planet, gravity_acc
+from viz import plot_best, plot_swarm_iter, plot_history
+
+# --------------------------- configuration --------------------------- #
 @dataclass
 class Config:
-    bees: int = 40
-    limit: int = 30          # scout trigger
-    iters: int = 200
+    bees: int = 60
+    limit: int = 30           # scout trigger
+    iters: int = 400
     waypoints: int = 8
-    max_speed: float = 4e4   # m/s
-    thrust_sigma: float = 5e-3
-    wp_sigma: float = 1e8    # metres
-    alpha: float = 1.0       # weight: time
-    beta: float = 0.01       # weight: fuel
-    gamma: float = 5.0       # weight: grav penalty
-# ----------------------------
 
-# planets (positions in metres, masses in kg – completely arbitrary for demo)
-SUN       = Planet('Sun',      0,         0,     1.989e30, radius=7e8)
-START     = Planet('Start',  2.5e11,     0,     6e24,      radius=6.4e6)
-OBSTACLE  = Planet('Obstacle',1.6e11, 1.0e11,   6e24,      radius=6.4e6)
-TARGET    = Planet('Target',  3.0e11, 2.0e11,   6e24,      radius=6.4e6)
-PLANETS = [SUN, START, OBSTACLE, TARGET]
+    # mutation scales
+    wp_sigma: float = 1e8             # metres
+    thrust_sigma_angle: float = 0.2   # radians
 
-def random_path(cfg:Config):
-    """Return list[waypoints] including start & target positions."""
+    # physics
+    max_speed: float = 4e4            # m/s (constant cruise)
+    thrust_per_dt: float = 10.0       # fuel units per second of thrust
+    misalign_penalty: float = 1.0     # extra fuel per rad of mis‑alignment
+
+    # objective weights
+    alpha: float = 1.0   # flight time
+    beta: float = 0.01   # fuel
+    gamma: float = 5.0   # gravity penalty
+
+    # bookkeeping
+    snap_stride: int = 10  # save swarm every k iterations
+
+# --------------------------- planets -------------------------------- #
+SUN      = Planet("Sun",      0,        0,     1.989e30, radius=7e8)
+START    = Planet("Start",  2.5e11,    0,     6e24)
+OBSTACLE = Planet("Obstacle",1.6e11, 1.0e11,  6e24)
+TARGET   = Planet("Target",  3.0e11, 2.0e11,  6e24)
+PLANETS  = [SUN, START, OBSTACLE, TARGET]
+
+# --------------------------- data classes --------------------------- #
+class Segment:
+    """Waypoint + thrust direction (theta)."""
+    def __init__(self, point: np.ndarray, theta: float):
+        self.point = point
+        self.theta = theta  # radians [0, 2π)
+
+# --------------------------- helpers -------------------------------- #
+
+def random_path(cfg: Config):
+    segs = []
+    # internal waypoints (excluding start/target)
+    for _ in range(cfg.waypoints - 2):
+        x = random.uniform(min(START.pos[0], TARGET.pos[0]), max(START.pos[0], TARGET.pos[0]))
+        y = random.uniform(min(START.pos[1], TARGET.pos[1]), max(START.pos[1], TARGET.pos[1]))
+        theta = random.uniform(0, 2 * np.pi)
+        segs.append(Segment(np.array([x, y]), theta))
+    # final segment leads to target; theta unused
+    segs.append(Segment(TARGET.pos, 0.0))
+    return segs
+
+
+def path_points(path):
+    """Return full list of np.array points including START and TARGET."""
     pts = [START.pos]
-    for _ in range(cfg.waypoints-2):
-        # uniform box around barycentre of start/target
-        x = random.uniform(min(START.pos[0], TARGET.pos[0]),
-                           max(START.pos[0], TARGET.pos[0]))
-        y = random.uniform(min(START.pos[1], TARGET.pos[1]),
-                           max(START.pos[1], TARGET.pos[1]))
-        pts.append(np.array([x,y], dtype=float))
-    pts.append(TARGET.pos)
+    pts.extend(seg.point for seg in path)
     return pts
 
-def cost(path, cfg:Config):
-    """Compute J for a full path."""
+
+def cost(path, cfg: Config):
     time = 0.0
     fuel = 0.0
     grav_pen = 0.0
-    v_max = cfg.max_speed
 
-    for i in range(len(path)-1):
-        p0, p1 = path[i], path[i+1]
-        seg = p1 - p0
-        dist = np.linalg.norm(seg)
-        if dist == 0: continue
-        seg_dir = seg / dist
-
-        # constant‑speed leg
-        dt = dist / v_max
+    pts = path_points(path)
+    for idx in range(len(pts) - 1):
+        p0, p1 = pts[idx], pts[idx + 1]
+        seg_vec = p1 - p0
+        dist = np.linalg.norm(seg_vec)
+        if dist == 0:
+            continue
+        dir_vec = seg_vec / dist
+        dt = dist / cfg.max_speed
         time += dt
 
-        # thrust to align with seg_dir (toy: assume Δv = v_max in that direction)
-        fuel += v_max * cfg.beta
+        # thrust fuel (constant magnitude per segment)
+        fuel += cfg.thrust_per_dt * dt
 
-        # sample mid‑point for gravity penalty
+        # mis‑alignment penalty
+        theta = path[idx].theta if idx < len(path) - 1 else 0.0
+        thrust_dir = np.array([np.cos(theta), np.sin(theta)])
+        mis = np.arccos(np.clip(np.dot(dir_vec, thrust_dir), -1, 1))
+        fuel += cfg.misalign_penalty * abs(mis)
+
+        # gravity penalty (sample mid‑point vs obstacle)
         mid = (p0 + p1) / 2
         r = np.linalg.norm(mid - OBSTACLE.pos)
-        if r < 1.5e10:                       # “gravity shell” radius (tunable)
+        if r < 1.5e10:  # arbitrary shell radius
             g_mag = np.linalg.norm(gravity_acc(mid, OBSTACLE))
             grav_pen += g_mag * dt
 
-    J = cfg.alpha * time + cfg.beta * fuel + cfg.gamma * grav_pen
-    return J
+    return cfg.alpha * time + cfg.beta * fuel + cfg.gamma * grav_pen
 
-def tweak(path, cfg:Config):
-    """Return a slightly mutated copy of path."""
-    new = [START.pos]
-    for p in path[1:-1]:
-        if random.random() < 0.8:  # 80 % chance mutate
-            p = p + np.random.normal(0, cfg.wp_sigma, size=2)
-        new.append(p)
-    new.append(TARGET.pos)
+
+def tweak(path, cfg: Config):
+    new = []
+    for seg in path[:-1]:  # leave target untouched
+        if random.random() < 0.8:
+            point = seg.point + np.random.normal(0, cfg.wp_sigma, 2)
+            theta = (seg.theta + np.random.normal(0, cfg.thrust_sigma_angle)) % (2 * np.pi)
+        else:
+            point, theta = seg.point.copy(), seg.theta
+        new.append(Segment(point, theta))
+    new.append(path[-1])  # keep final segment
     return new
 
-def abc(cfg:Config):
-    # init
+# --------------------------- ABC core ------------------------------- #
+
+def abc(cfg: Config):
     paths = [random_path(cfg) for _ in range(cfg.bees)]
-    costs = [cost(p,cfg) for p in paths]
-    trials = [0]*cfg.bees
+    costs = [cost(p, cfg) for p in paths]
+    trials = [0] * cfg.bees
     best_idx = int(np.argmin(costs))
-    best_path = paths[best_idx].copy()
+    best_path = paths[best_idx]
     best_cost = costs[best_idx]
+
     history = []
+    snapshots = []
 
     for it in range(cfg.iters):
-        # ----- employed phase -----
+        # employed phase
         for i in range(cfg.bees):
-            candidate = tweak(paths[i], cfg)
-            c_cost = cost(candidate, cfg)
+            cand = tweak(paths[i], cfg)
+            c_cost = cost(cand, cfg)
             if c_cost < costs[i]:
-                paths[i], costs[i] = candidate, c_cost
+                paths[i], costs[i] = cand, c_cost
                 trials[i] = 0
             else:
                 trials[i] += 1
 
-        # ----- on‑looker phase -----
-        inv = 1/np.array(costs)
+        # on‑looker phase
+        inv = 1 / np.array(costs)
         probs = inv / inv.sum()
         for _ in range(cfg.bees):
             i = np.random.choice(cfg.bees, p=probs)
-            candidate = tweak(paths[i], cfg)
-            c_cost = cost(candidate, cfg)
+            cand = tweak(paths[i], cfg)
+            c_cost = cost(cand, cfg)
             if c_cost < costs[i]:
-                paths[i], costs[i] = candidate, c_cost
+                paths[i], costs[i] = cand, c_cost
                 trials[i] = 0
             else:
                 trials[i] += 1
 
-        # ----- scout phase -----
+        # scout phase
         for i in range(cfg.bees):
             if trials[i] >= cfg.limit:
                 paths[i] = random_path(cfg)
                 costs[i] = cost(paths[i], cfg)
                 trials[i] = 0
 
-        # track global best
+        # update global best
         idx = int(np.argmin(costs))
         if costs[idx] < best_cost:
             best_cost = costs[idx]
-            best_path = paths[idx].copy()
-        history.append(best_cost)
+            best_path = paths[idx]
 
-    return best_path, paths, history
+        history.append(best_cost)
+        if it % cfg.snap_stride == 0:
+            snapshots.append([path_points(p) for p in paths])
+
+    return best_path, paths, history, snapshots
+
+# --------------------------- CLI ------------------------------------ #
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--bees', type=int, default=40)
-    ap.add_argument('--iters', type=int, default=200)
-    ap.add_argument('--show', action='store_true')
+    ap.add_argument("--bees", type=int, default=60)
+    ap.add_argument("--iters", type=int, default=400)
+    ap.add_argument("--show", action="store_true")
+    ap.add_argument("--pct", type=float, default=0.25, help="fraction (0‑1) or max int of bees to plot per snapshot")
     args = ap.parse_args()
 
     cfg = Config(bees=args.bees, iters=args.iters)
-    best, swarm, _ = abc(cfg)
+    best, swarm, history, snaps = abc(cfg)
 
-    print(f"Best cost: {cost(best,cfg):.3e}")
+    best_cost = cost(best, cfg)
+    print(f"Best cost: {best_cost:.3e}")
+
     if args.show:
-        plot_scene(PLANETS, best, all_paths=swarm,
-                title=f'ABC – best J={cost(best,cfg):.2e}')
+        plot_best(PLANETS, path_points(best), best_cost, save="best_path.png")
+        plot_swarm_iter(PLANETS, snaps, pct=args.pct, save="swarm_iters.png")
+        plot_history(history, save="training_curve.png")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
