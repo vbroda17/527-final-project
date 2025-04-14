@@ -1,10 +1,12 @@
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import numpy as np
-import os
+from matplotlib.collections import LineCollection
+from matplotlib.colors import Normalize
 
 plt.style.use("dark_background")
 
+# -------------------------------- colour map for bodies -----------------------------
 COL = {
     "Sun":      "#ffcc00",
     "Start":    "#20d67b",
@@ -12,143 +14,103 @@ COL = {
     "Obstacle": "#ff5033",
 }
 
-def _orbit(ax, r, col, ctr=(0,0), k=1.0):
-    theta = np.linspace(0, 2*np.pi, 400)
-    x = ctr[0] + k*r*np.cos(theta)
-    y = ctr[1] + k*r*np.sin(theta)
-    ax.plot(x, y, lw=1, color=col, alpha=.25)
+# -------------------------------- helpers -------------------------------------------
 
-def _bodies(ax, planets):
-    for p in planets:
-        col = COL.get(p.name,"#aaaaaa")
-        size = 150 if p.name=="Sun" else 50
-        ax.scatter(*p.pos, s=size, color=col, edgecolor="k",
-                   zorder=4, label=p.name)
+def orbit(ax, body, k: float = 1.0, t_sample: float = 0.0):
+    """Draw a faint circular orbit for *body* (static‑pos bodies only)."""
+    if body.name == "Sun":
+        return  # Sun at origin, no orbit ring
+    if body.orbit_func is None:
+        r = np.linalg.norm(body.pos(t_sample))
+        θ = np.linspace(0, 2*np.pi, 400)
+        ax.plot(k*r*np.cos(θ), k*r*np.sin(θ), lw=1, color=COL.get(body.name, "#888"), alpha=.25)
 
-def plot_best(planets, best_path, best_cost, save=None):
-    fig, ax = plt.subplots(figsize=(6,6))
+
+def bodies_plot(ax, bodies, t: float = 0.0):
+    for b in bodies:
+        p = b.pos(t)
+        col = COL.get(b.name, "#aaaaaa")
+        size = 150 if b.name == "Sun" else 60
+        ax.scatter(*p, s=size, color=col, edgecolor="k", zorder=4, label=b.name)
+
+
+def gradient_line(ax, pts: np.ndarray, cmap: str = "turbo", add_cbar: bool = True):
+    """Draw dotted path with smooth gradient & optional colour‑bar (time)."""
+    segs = np.concatenate([pts[:-1, None, :], pts[1:, None, :]], axis=1)
+    norm = Normalize(vmin=0, vmax=len(pts)-1)
+    lc = LineCollection(segs, cmap=cmap, norm=norm, linewidths=2, linestyle=":")
+    lc.set_array(np.arange(len(pts)))
+    ax.add_collection(lc)
+    if add_cbar:
+        cbar = plt.colorbar(lc, ax=ax, orientation="vertical", fraction=.045, pad=.03)
+        cbar.set_label("Time →", rotation=270, labelpad=15)
+    return lc
+
+# -------------------------------- top‑level plots -----------------------------------
+
+def best_plot(run_dir, bodies, best_pts: np.ndarray):
+    fig, ax = plt.subplots(figsize=(6, 6))
     ax.set_aspect("equal")
-    for p in planets:
-        if p.name != "Sun":
-            _orbit(ax, np.linalg.norm(p.pos), COL.get(p.name,"#888"), k=1.0)
-    _bodies(ax, planets)
 
-    # best path dotted line
-    pts = np.vstack([seg.point if hasattr(seg, 'point') else seg
-                     for seg in best_path])
-    ax.plot(pts[:,0], pts[:,1], ls=":", lw=2.5, color="white", label="best")
+    for b in bodies:
+        orbit(ax, b)
+    bodies_plot(ax, bodies)
+    gradient_line(ax, best_pts, cmap="turbo", add_cbar=True)
 
-    ax.legend(fontsize="small")
     ax.set_title("Optimal path")
-    ax.text(0.02, 0.97, f"Cost = {best_cost:.2e}",
-            transform=ax.transAxes, ha="left", va="top",
-            fontsize="small", color="white")
-    if save:
-        fig.savefig(save, dpi=150, bbox_inches="tight")
+    # move legend outside
+    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize="small")
+    fig.tight_layout()
+    fig.savefig(run_dir / "best_path.png", dpi=150)
     plt.show()
 
-def plot_history(history, save=None):
+
+def swarm_final(run_dir, bodies, swarm_pts):
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.set_aspect("equal")
+    for b in bodies:
+        orbit(ax, b)
+    bodies_plot(ax, bodies)
+    for pts in swarm_pts:
+        ax.plot(pts[:, 0], pts[:, 1], lw=0.4, color="#666", alpha=0.5)
+    ax.set_title("Swarm exploration – final iter")
+    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize="small")
+    fig.tight_layout()
+    fig.savefig(run_dir / "swarm_final.png", dpi=150)
+    plt.show()
+
+
+def training_curve(run_dir, hist):
     fig, ax = plt.subplots()
-    ax.plot(history, lw=1.5)
+    ax.plot(hist)
     ax.set_xlabel("Iteration")
     ax.set_ylabel("Best cost")
     ax.set_title("Training curve")
-    ax.grid(alpha=.3)
-    if save:
-        fig.savefig(save, dpi=150, bbox_inches="tight")
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(run_dir / "training_curve.png", dpi=150)
     plt.show()
 
-def plot_swarm_final(planets, swarm_paths, save=None):
-    """
-    Swarm at final iteration (each path in grey).
-    """
-    fig, ax = plt.subplots(figsize=(6,6))
-    ax.set_aspect("equal")
 
-    for p in planets:
-        if p.name != "Sun":
-            _orbit(ax, np.linalg.norm(p.pos), COL.get(p.name,"#888"), k=1.0)
-    _bodies(ax, planets)
-
-    for path in swarm_paths:
-        pts = np.vstack([seg.point if hasattr(seg, 'point') else seg
-                         for seg in path])
-        ax.plot(pts[:,0], pts[:,1], lw=0.4, color="#666666", alpha=0.5)
-
-    ax.set_title("Swarm exploration (final iteration)")
-    if save:
-        fig.savefig(save, dpi=150, bbox_inches="tight")
-    plt.show()
-
-def plot_swarm_snapshots(planets, snapshots, pct=0.25, outdir=None):
-    """
-    Color-coded by iteration. Optionally save each snapshot image to 'outdir'.
-    - snapshots is a list of [paths], each a list of segments.
-    - We sub-sample each snapshot's swarm with 'pct'.
-    """
-    # if outdir is specified, we skip calling plt.show() for each iteration
-    # and only show the last plot to avoid spamming windows.
-    n_snaps = len(snapshots)
-    cmap = cm.get_cmap("viridis", n_snaps)
-
-    for i, swarm in enumerate(snapshots):
-        fig, ax = plt.subplots(figsize=(6,6))
+def snapshot_plots(train_dir, bodies, snaps, pct):
+    """Save colour‑coded swarm snapshots to *train_dir*."""
+    import random
+    cmap = cm.get_cmap("viridis", len(snaps))
+    for i, swarm in enumerate(snaps):
+        fig, ax = plt.subplots(figsize=(6, 6))
         ax.set_aspect("equal")
-        for p in planets:
-            if p.name != "Sun":
-                _orbit(ax, np.linalg.norm(p.pos), COL.get(p.name,"#888"), k=1.0)
-        _bodies(ax, planets)
-
-        color = cmap(i)
-        # pick a fraction or max number from the swarm
+        for b in bodies:
+            orbit(ax, b)
+        bodies_plot(ax, bodies)
+        col = cmap(i)
         if 0 < pct < 1:
-            import random
-            keep = random.sample(swarm, int(len(swarm)*pct))
+            keep = random.sample(swarm, int(len(swarm) * pct))
         else:
-            # interpret as absolute max
-            keep = swarm
-            if len(keep) > pct:
-                import random
-                keep = random.sample(keep, int(pct))
-
-        for path in keep:
-            pts = np.vstack([seg.point if hasattr(seg, 'point') else seg
-                             for seg in path])
-            ax.plot(pts[:,0], pts[:,1], lw=0.5, color=color, alpha=0.6)
-
-        ax.set_title(f"Swarm at iteration {i}")
-
-        if outdir:
-            os.makedirs(outdir, exist_ok=True)
-            fpath = os.path.join(outdir, f"iter_{i}.png")
-            fig.savefig(fpath, dpi=150, bbox_inches="tight")
-            plt.close(fig)
-        else:
-            plt.show()
-
-    # If we saved all figures, optionally show the last snapshot
-    if outdir and snapshots:
-        i = len(snapshots)-1
-        fig, ax = plt.subplots(figsize=(6,6))
-        ax.set_aspect("equal")
-        for p in planets:
-            if p.name != "Sun":
-                _orbit(ax, np.linalg.norm(p.pos), COL.get(p.name,"#888"), k=1.0)
-        _bodies(ax, planets)
-        color = cmap(i)
-        keep = snapshots[-1]
-        if 0 < pct < 1:
-            import random
-            keep = random.sample(keep, int(len(keep)*pct))
-        else:
-            if len(keep) > pct:
-                import random
-                keep = random.sample(keep, int(pct))
-
-        for path in keep:
-            pts = np.vstack([seg.point if hasattr(seg, 'point') else seg
-                             for seg in path])
-            ax.plot(pts[:,0], pts[:,1], lw=0.5, color=color, alpha=0.6)
-
-        ax.set_title(f"Swarm at iteration {i}")
-        plt.show()
+            keep = random.sample(swarm, min(int(pct), len(swarm)))
+        for pts in keep:
+            ax.plot(pts[:, 0], pts[:, 1], lw=0.5, color=col, alpha=0.6)
+        ax.set_title(f"Swarm iteration {i}")
+        ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize="x-small")
+        fig.tight_layout()
+        fig.savefig(train_dir / f"iter_{i}.png", dpi=120)
+        plt.close(fig)
