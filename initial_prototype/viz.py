@@ -6,83 +6,71 @@ from matplotlib.colors import Normalize
 
 plt.style.use("dark_background")
 
-# -------------------------------- colour map for bodies -----------------------------
-COL = {
-    "Sun":      "#ffcc00",
-    "Start":    "#20d67b",
-    "Target":   "#00bfff",
+COLOURS = {
+    "Sun": "#ffcc00",
+    "Start": "#20d67b",
+    "Target": "#00bfff",
     "Obstacle": "#ff5033",
 }
 
-# -------------------------------- helpers -------------------------------------------
 
-def orbit(ax, body, k: float = 1.0, t_sample: float = 0.0):
-    """Draw a faint circular orbit for *body* (static‑pos bodies only)."""
+# -----------------------------------------------------------------------------
+# Helper drawing functions
+# -----------------------------------------------------------------------------
+
+def draw_orbit(ax, body, t0: float = 0.0, k: float = 1.0) -> None:
     if body.name == "Sun":
-        return  # Sun at origin, no orbit ring
-    if body.orbit_func is None:
-        r = np.linalg.norm(body.pos(t_sample))
-        θ = np.linspace(0, 2*np.pi, 400)
-        ax.plot(k*r*np.cos(θ), k*r*np.sin(θ), lw=1, color=COL.get(body.name, "#888"), alpha=.25)
+        return
+    if body.orbit_func is not None:
+        return  # skipping moving orbits for now
+    radius = np.linalg.norm(body.pos(t0))
+    theta = np.linspace(0.0, 2.0 * np.pi, 400)
+    x = k * radius * np.cos(theta)
+    y = k * radius * np.sin(theta)
+    ax.plot(x, y, lw=1.0, color=COLOURS.get(body.name, "#888888"), alpha=0.25)
 
 
-def bodies_plot(ax, bodies, t: float = 0.0):
-    for b in bodies:
-        p = b.pos(t)
-        col = COL.get(b.name, "#aaaaaa")
-        size = 150 if b.name == "Sun" else 60
-        ax.scatter(*p, s=size, color=col, edgecolor="k", zorder=4, label=b.name)
+def draw_bodies(ax, bodies, t: float = 0.0) -> None:
+    for body in bodies:
+        p = body.pos(t)
+        colour = COLOURS.get(body.name, "#aaaaaa")
+        size = 150 if body.name == "Sun" else 60
+        ax.scatter(*p, s=size, color=colour, edgecolor="k", zorder=4, label=body.name)
 
 
-def gradient_line(ax, pts: np.ndarray, cmap: str = "turbo", add_cbar: bool = True):
-    """Draw dotted path with smooth gradient & optional colour‑bar (time)."""
-    segs = np.concatenate([pts[:-1, None, :], pts[1:, None, :]], axis=1)
-    norm = Normalize(vmin=0, vmax=len(pts)-1)
-    lc = LineCollection(segs, cmap=cmap, norm=norm, linewidths=2, linestyle=":")
-    lc.set_array(np.arange(len(pts)))
+def gradient_path(ax, points: np.ndarray, cmap: str = "turbo") -> None:
+    segments = np.concatenate([points[:-1, None, :], points[1:, None, :]], axis=1)
+    norm = Normalize(vmin=0, vmax=len(points) - 1)
+    lc = LineCollection(segments, cmap=cmap, norm=norm, linewidths=2, linestyle=":")
+    lc.set_array(np.arange(len(points)))
     ax.add_collection(lc)
-    if add_cbar:
-        cbar = plt.colorbar(lc, ax=ax, orientation="vertical", fraction=.045, pad=.03)
-        cbar.set_label("Time →", rotation=270, labelpad=15)
-    return lc
+    cbar = plt.colorbar(lc, ax=ax, orientation="vertical", fraction=0.045, pad=0.03)
+    cbar.set_label("Time →", rotation=270, labelpad=15)
 
-# -------------------------------- top‑level plots -----------------------------------
 
-def best_plot(run_dir, bodies, best_pts: np.ndarray):
+# -----------------------------------------------------------------------------
+# Public plot helpers
+# -----------------------------------------------------------------------------
+
+def save_best_plot(run_dir, bodies, best_points: np.ndarray) -> None:
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.set_aspect("equal")
 
-    for b in bodies:
-        orbit(ax, b)
-    bodies_plot(ax, bodies)
-    gradient_line(ax, best_pts, cmap="turbo", add_cbar=True)
+    for body in bodies:
+        draw_orbit(ax, body)
+    draw_bodies(ax, bodies)
+    gradient_path(ax, best_points)
 
     ax.set_title("Optimal path")
-    # move legend outside
     ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize="small")
     fig.tight_layout()
     fig.savefig(run_dir / "best_path.png", dpi=150)
     plt.show()
 
 
-def swarm_final(run_dir, bodies, swarm_pts):
-    fig, ax = plt.subplots(figsize=(6, 6))
-    ax.set_aspect("equal")
-    for b in bodies:
-        orbit(ax, b)
-    bodies_plot(ax, bodies)
-    for pts in swarm_pts:
-        ax.plot(pts[:, 0], pts[:, 1], lw=0.4, color="#666", alpha=0.5)
-    ax.set_title("Swarm exploration – final iter")
-    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize="small")
-    fig.tight_layout()
-    fig.savefig(run_dir / "swarm_final.png", dpi=150)
-    plt.show()
-
-
-def training_curve(run_dir, hist):
+def save_training_curve(run_dir, history: list[float]) -> None:
     fig, ax = plt.subplots()
-    ax.plot(hist)
+    ax.plot(history)
     ax.set_xlabel("Iteration")
     ax.set_ylabel("Best cost")
     ax.set_title("Training curve")
@@ -92,23 +80,22 @@ def training_curve(run_dir, hist):
     plt.show()
 
 
-def snapshot_plots(train_dir, bodies, snaps, pct):
-    """Save colour‑coded swarm snapshots to *train_dir*."""
-    import random
-    cmap = cm.get_cmap("viridis", len(snaps))
-    for i, swarm in enumerate(snaps):
+def save_swarm_snapshots(train_dir, bodies, snapshots, pct: float) -> None:
+    cmap = cm.get_cmap("viridis", len(snapshots))
+    for i, swarm in enumerate(snapshots):
         fig, ax = plt.subplots(figsize=(6, 6))
         ax.set_aspect("equal")
-        for b in bodies:
-            orbit(ax, b)
-        bodies_plot(ax, bodies)
-        col = cmap(i)
-        if 0 < pct < 1:
+        for body in bodies:
+            draw_orbit(ax, body)
+        draw_bodies(ax, bodies)
+        colour = cmap(i)
+        if 0.0 < pct < 1.0:
+            import random
             keep = random.sample(swarm, int(len(swarm) * pct))
         else:
-            keep = random.sample(swarm, min(int(pct), len(swarm)))
-        for pts in keep:
-            ax.plot(pts[:, 0], pts[:, 1], lw=0.5, color=col, alpha=0.6)
+            keep = swarm
+        for path_points in keep:
+            ax.plot(path_points[:, 0], path_points[:, 1], lw=0.5, color=colour, alpha=0.6)
         ax.set_title(f"Swarm iteration {i}")
         ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize="x-small")
         fig.tight_layout()
