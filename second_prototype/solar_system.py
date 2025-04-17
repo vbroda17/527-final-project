@@ -27,6 +27,9 @@ from matplotlib.animation import FuncAnimation
 from tqdm.auto import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed   # parallel
 
+import numpy as np, math
+from pathlib import Path
+
 # ──────────────────────────────────────────────────────────────────────────────
 #   Unit conversion helpers (same as before)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -248,6 +251,92 @@ def animate(bodies, t_arr, traj, elliptical, save=False):
         print("GIF saved to orbit_anim.gif")
 
     plt.show()
+
+#
+# For Simuilation
+#
+
+# ───────────────────  NEW CLASS  ────────────────────────────
+class GravSim:
+    """
+    Light wrapper around the pre‑computed planet trajectories that provides:
+        • get_positions()  -> array (N_planets, 2)
+        • gravity_accel(pos) -> vec2    (Sun + every planet)
+        • step(dt)          -> advance internal index by one time‑step
+    """
+    def __init__(self, bodies, traj, t_arr, star_mass):
+        self.bodies   = bodies          # list of dicts
+        self.traj     = traj            # (N_pl, N_steps, 2)
+        self.t_arr    = t_arr
+        self.star_mass= star_mass
+        self.i        = 0               # current frame index
+        self.N_steps  = traj.shape[1]
+        self.masses   = np.array([star_mass] + [b["mass"] for b in bodies])
+        self.G        = G_AU3_EM_day2
+
+    # ----------------  query helpers  ----------------
+    def get_positions(self):
+        """Planet positions at current time index (N_planets, 2)."""
+        return self.traj[:, self.i]
+
+    def get_body(self, name:str):
+        for j,b in enumerate(self.bodies):
+            if b["name"].lower()==name.lower():
+                return j, b
+        raise ValueError(f"'{name}' not in bodies list")
+
+    def gravity_accel(self, pos: np.ndarray):
+        """
+        Total gravitational acceleration at point `pos` (AU).
+        Safe when pos coincides with a planet (skip that term).
+        """
+        a = np.zeros(2)
+        G = self.G
+
+        # Sun (origin)
+        r0 = -pos
+        dist3 = np.linalg.norm(r0) ** 3
+        a += G * self.star_mass * r0 / dist3
+
+        # Planets
+        pl_xy = self.get_positions()              # (N, 2)
+        rel    = pl_xy - pos                      # (N, 2)
+        dist3  = np.linalg.norm(rel, axis=1)**3
+        dist3  = np.where(dist3 == 0, np.inf, dist3)      # <= skip exact overlaps
+        a     += (self.G * self.masses[1:, None] * rel / dist3[:, None]).sum(axis=0)
+
+        return a
+
+
+    # ----------------  time stepping  ----------------
+    def step(self, dt_days: float = None):
+        """
+        Advance one stored frame.  If dt_days is given and differs from the
+        stored grid, we advance by the nearest integer frame(s).
+        """
+        if dt_days is None:
+            self.i = (self.i + 1) % self.N_steps
+        else:
+            k = int(round(dt_days / (self.t_arr[1]-self.t_arr[0])))
+            self.i = (self.i + k) % self.N_steps
+        return self.t_arr[self.i]
+
+    # convenience
+    def current_time(self): return self.t_arr[self.i]
+
+def build_sim(years=5, dt=1.0, system="systems/solar_system", elliptical=True):
+    # your existing loading + precompute code here, but *return* GravSim
+    folder = Path(system)
+    meta   = read_simple_kv(folder/"metadata.txt")
+    meta.setdefault("distance_unit","AU");  meta.setdefault("mass_unit","EarthMass")
+    meta.setdefault("angle_unit","deg")
+    sun   = load_sun(folder, meta)
+    bodies= load_bodies(folder, meta)
+
+    total_days = years*365
+    t_arr, traj = precompute(bodies, total_days, dt, sun["mass"], elliptical)
+    return GravSim(bodies, traj, t_arr, sun["mass"])
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 #   Main
