@@ -165,68 +165,88 @@ def precompute(bodies,total_days,dt, M_central, elliptical):
 # ──────────────────────────────────────────────────────────────────────────────
 #   Plotting & animation
 # ──────────────────────────────────────────────────────────────────────────────
-def static_overview(ax,bodies,elliptical):
-    cmap=plt.cm.plasma
-    colors=cmap(np.linspace(0.15,0.95,len(bodies)))
-    lim=0
-    for body,c in zip(bodies,colors):
-        a,e=elements(body)
+def static_overview(ax, bodies, traj0, elliptical):
+    cmap   = plt.cm.plasma
+    colors = cmap(np.linspace(0.15, 0.95, len(bodies)))
+
+    lim = 0
+    for (body, start_xy, col) in zip(bodies, traj0, colors):
+        a, e = elements(body)
         if elliptical:
-            th=np.linspace(0,2*math.pi,400)
-            r=a*(1-e**2)/(1+e*np.cos(th))
-            ax.plot(r*np.cos(th),r*np.sin(th),'--',color=c,alpha=0.4)
+            th = np.linspace(0, 2 * math.pi, 400)
+            r  = a * (1 - e ** 2) / (1 + e * np.cos(th))
+            ax.plot(r * np.cos(th), r * np.sin(th), "--", color=col, alpha=0.45)
         else:
-            circ=plt.Circle((0,0),a,fill=False,ls='--',color=c,alpha=0.4)
+            circ = plt.Circle((0, 0), a, fill=False, ls="--", color=col, alpha=0.45)
             ax.add_patch(circ)
-        lim=max(lim,body["aphelion"])
-        # starting dot
-        pos=position_at_time(body,0,1) if elliptical else np.array([a,0])
-        ax.scatter(*pos,color=c,s=30,label=body["name"])
-    ax.scatter(0,0,color='gold',s=120,zorder=5,label="Sun")
-    ax.set_aspect('equal')
+
+        # checkpoint dot (hollow) sitting at the true start position
+        ax.scatter(*start_xy, s=90, facecolors="none",
+                   edgecolors=col, linewidths=1.3, zorder=5)
+        lim = max(lim, body["aphelion"])
+
+    ax.scatter(0, 0, color="gold", s=120, zorder=6, label="Sun")
+    ax.set_aspect("equal")
     ax.set_xlabel("AU"); ax.set_ylabel("AU")
-    ax.set_xlim(-1.1*lim,1.1*lim); ax.set_ylim(-1.1*lim,1.1*lim)
-    ax.legend(fontsize=7,loc='upper right')
+    ax.set_xlim(-1.1 * lim, 1.1 * lim); ax.set_ylim(-1.1 * lim, 1.1 * lim)
 
-def animate(bodies,t_arr,traj,elliptical,save=False):
-    cmap=plt.cm.plasma
-    colors=cmap(np.linspace(0.15,0.95,len(bodies)))
-    orbits=[period(elements(b)[0],1) for b in bodies]
+def animate(bodies, t_arr, traj, elliptical, save=False):
+    """
+    Increment counter exactly when the planet passes its start‐point.
+    Counter *always* starts at 0.
+    """
+    import math, numpy as np
+    cmap   = plt.cm.plasma
+    colors = cmap(np.linspace(0.15, 0.95, len(bodies)))
 
-    fig,ax=plt.subplots(figsize=(6,6),facecolor='k')
-    fig.patch.set_facecolor('k')
-    ax.set_facecolor('k')
-    static_overview(ax,bodies,elliptical)  # draws orbits faintly
+    start_xy = traj[:, 0]                               # (N,2) first position
+    theta0   = np.arctan2(start_xy[:, 1], start_xy[:, 0])
+    prev_phi = np.zeros(len(bodies))                    # previous wrapped φ
+    counter  = np.zeros(len(bodies), dtype=int)         # integer orbits
 
-    pts=[ax.plot([],[],'o',color=c)[0] for c in colors]
-    trails=[ax.plot([],[],'-',color=c,lw=1)[0] for c in colors]
-    txts=[ax.text(0,0,'',color=c,fontsize=8,ha='left',va='bottom')
-          for c in colors]
+    # ── Figure and static backdrop ───────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(6, 6), facecolor="k")
+    fig.patch.set_facecolor("k");  ax.set_facecolor("k")
+    static_overview(ax, bodies, start_xy, elliptical)   # shows hollow ring
 
+    movers  = [ax.plot([], [], "o", color=c, zorder=4)[0] for c in colors]
+    trails  = [ax.plot([], [], "-", color=c, lw=1)[0]      for c in colors]
+    labels  = [ax.text(xy[0], xy[1], "0", color="w", fontsize=8,
+                       ha="center", va="center", zorder=6)
+               for xy in start_xy]
+
+    # ── animator helpers ────────────────────────────────────────────────
     def init():
-        for p,t,l in zip(pts,trails,txts):
-            p.set_data([],[])
-            t.set_data([],[])
-            l.set_text('')
-        return pts+trails+txts
+        for m, t in zip(movers, trails):
+            m.set_data([], [])
+            t.set_data([], [])
+        return movers + trails + labels
 
     def update(frame):
-        for i,(p,t,l) in enumerate(zip(pts,trails,txts)):
-            px,py=traj[i,frame]
-            p.set_data([px],[py])
-            # trail:
-            t.set_data(traj[i,:frame+1,0],traj[i,:frame+1,1])
-            n_orb=int(t_arr[frame]//orbits[i])
-            label=bodies[i]["name"]+ (f" ×{n_orb}" if n_orb>0 else "")
-            l.set_text(label)
-            l.set_position((px*1.05,py*1.05))
-        return pts+trails+txts
+        for i, (mov, trl, lbl) in enumerate(zip(movers, trails, labels)):
+            x, y = traj[i, frame]
+            mov.set_data([x], [y])
+            trl.set_data(traj[i, :frame + 1, 0], traj[i, :frame + 1, 1])
 
-    ani=FuncAnimation(fig,update,frames=len(t_arr),
-                      init_func=init,interval=30,blit=True)
+            # current polar angle, then wrapped φ in [0, 2π)
+            theta = math.atan2(y, x)
+            phi   = (theta - theta0[i]) % (2 * math.pi)
+
+            # detect wrap‑around (passed the start point)
+            if phi < prev_phi[i] - 1e-6:       # crossed from high (~6.28) to low (~0)
+                counter[i] += 1                # completed an orbit
+                lbl.set_text(str(counter[i]))  # update number
+
+            prev_phi[i] = phi                  # store for next frame
+        return movers + trails + labels
+
+    ani = FuncAnimation(fig, update, frames=len(t_arr),
+                        init_func=init, interval=30, blit=True)
+
     if save:
-        ani.save("orbit_anim.gif",writer="pillow",fps=30)
+        ani.save("orbit_anim.gif", writer="pillow", fps=30)
         print("GIF saved to orbit_anim.gif")
+
     plt.show()
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -257,8 +277,11 @@ def main():
 
     # 1. static figure always
     plt.style.use('dark_background')
-    fig,ax=plt.subplots(figsize=(6,6))
-    static_overview(ax,bodies,args.ellip)
+    fig, ax = plt.subplots(figsize=(6, 6))
+    static_overview(ax, bodies, 
+                    traj0=np.array([position_at_time(b, 0, 1) if args.ellip else position_circle(b, 0, 1) for b in bodies]),
+                    elliptical=args.ellip)
+
     fig.savefig("orbit_overview.png",dpi=200,bbox_inches='tight')
     print("Static plot saved to orbit_overview.png")
     if args.static:
