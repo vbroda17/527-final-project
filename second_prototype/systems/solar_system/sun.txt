@@ -1,0 +1,2 @@
+Mass = 332946    # Sun mass in Earth masses (e.g., 332,946 Earth masses)
+Radius = 0.00465 # Sun radius in AU (approx 0.00465 AU, ~696,000 km)

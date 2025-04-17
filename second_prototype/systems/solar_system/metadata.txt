@@ -1,0 +1,5 @@
+epoch = J2000          # Reference epoch for the starting angles
+distance_unit = AU
+time_unit = day
+mass_unit = EarthMass
+angle_unit = degree
