@@ -1,191 +1,276 @@
-# solar_system.py
+#!/usr/bin/env python3
+"""
+solar_system.py  –  static overview *and* animated orbits with progress bar.
+
+CLI
+----
+python solar_system.py [--ellipse | --circular] [--years N] [--dt DAYS]
+                       [--system PATH] [--static]
+
+    --ellipse / --circular   choose orbit model   (default elliptical)
+    --years    N             simulate this many Earth years (default 5)
+    --dt       DAYS          time step in days    (default 1)
+    --static                 skip the animation, only build static PNG
+    --system   PATH          data folder (default systems/solar_system)
+
+Requires: numpy, matplotlib, tqdm  (concurrent.futures is in std‑lib)
+"""
+
+from __future__ import annotations
+import argparse, csv, math, os, sys
+from pathlib import Path
+from typing import Dict, List, Tuple
+
 import numpy as np
-import csv
-from helpers import read_sun_file, read_bodies_file, read_metadata, save_orbit_cache, load_orbit_cache
-from helpers import G, compute_gravitational_param
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from tqdm.auto import tqdm
+from concurrent.futures import ProcessPoolExecutor, as_completed   # parallel
 
-class CelestialBody:
-    """Class to store basic data for a celestial body (planet or star)."""
-    def __init__(self, name, mass, radius, aphelion=None, perihelion=None, mean_anomaly=None):
-        self.name = name
-        self.mass = mass            # in Earth masses (or specified unit)
-        self.radius = radius        # in AU (if distance unit is AU)
-        # Orbital parameters (for planets; None for the central star)
-        self.aphelion = aphelion    
-        self.perihelion = perihelion
-        self.mean_anomaly = mean_anomaly  # at epoch (in radians)
-        if aphelion and perihelion:
-            # Compute semi-major axis and eccentricity for elliptical orbit
-            self.a = 0.5 * (aphelion + perihelion)
-            self.e = (aphelion - perihelion) / (aphelion + perihelion)
+# ──────────────────────────────────────────────────────────────────────────────
+#   Unit conversion helpers (same as before)
+# ──────────────────────────────────────────────────────────────────────────────
+AU_KM          = 1.495_978_707e8          # km
+EARTH_MASS_KG  = 5.9722e24
+SOLAR_MASS_EM  = 332_946.0
+DEG2RAD        = math.pi / 180.0
+
+def dist_to_au(val: float, unit: str) -> float:
+    u = unit.lower()
+    if u.startswith("au"):  return val
+    if u in ("km", "kilometre", "kilometer"): return val / AU_KM
+    if u == "m": return val / (AU_KM * 1e3)
+    raise ValueError(f"unknown distance unit '{unit}'")
+
+def mass_to_earth(val: float, unit: str) -> float:
+    u = unit.lower()
+    if "earth" in u: return val
+    if "solar" in u or "sun" in u: return val * SOLAR_MASS_EM
+    if u == "kg": return val / EARTH_MASS_KG
+    raise ValueError(f"unknown mass unit '{unit}'")
+
+def angle_to_rad(val: float, unit: str) -> float:
+    u = unit.lower()
+    if u.startswith("rad"): return val
+    if u.startswith("deg"): return val * DEG2RAD
+    raise ValueError(f"unknown angle unit '{unit}'")
+
+# ──────────────────────────────────────────────────────────────────────────────
+#   File IO
+# ──────────────────────────────────────────────────────────────────────────────
+def read_simple_kv(path: Path) -> Dict[str,str]:
+    d={}
+    with path.open() as f:
+        for ln in f:
+            ln=ln.split("#")[0].strip()
+            if "=" in ln:
+                k,v=[x.strip() for x in ln.split("=",1)]
+                d[k.lower()]=v
+    return d
+
+def load_sun(folder: Path, meta: Dict[str,str]):
+    d=read_simple_kv(folder/"sun.txt")
+    mass_u   = d.get("mass_unit",   meta.get("mass_unit","EarthMass"))
+    radius_u = d.get("radius_unit", meta.get("distance_unit","AU"))
+    return {
+        "mass":   mass_to_earth(float(d["mass"]),   mass_u),
+        "radius": dist_to_au   (float(d["radius"]), radius_u),
+    }
+
+def load_bodies(folder: Path, meta: Dict[str,str]) -> List[Dict]:
+    bodies=[]
+    with (folder/"bodies.csv").open(newline="") as f:
+        rdr=csv.DictReader(f)
+        for r in rdr:
+            radius_u = meta.get("radius_unit",   meta.get("distance_unit","AU"))
+            mass_u   = meta.get("mass_unit","EarthMass")
+            ap_u     = meta.get("aphelion_unit", meta.get("distance_unit","AU"))
+            per_u    = meta.get("perihelion_unit",meta.get("distance_unit","AU"))
+            ang_u    = meta.get("mean_anomaly_unit",meta.get("angle_unit","deg"))
+            bodies.append({
+                "name":       r["name"].strip(),
+                "radius":     dist_to_au(float(r["radius"]), radius_u),
+                "mass":       mass_to_earth(float(r["mass"]), mass_u),
+                "aphelion":   dist_to_au(float(r["aphelion"]), ap_u),
+                "perihelion": dist_to_au(float(r["perihelion"]), per_u),
+                "M0":         angle_to_rad(float(r["mean_anomaly"]), ang_u)
+            })
+    return bodies
+
+# ──────────────────────────────────────────────────────────────────────────────
+#   Orbit maths
+# ──────────────────────────────────────────────────────────────────────────────
+G_AU3_EM_day2 = 6.67430e-11 * (86400**2) / (AU_KM*1000)**3 * EARTH_MASS_KG  # AU^3 / (EM * day^2)
+
+def elements(body:Dict):
+    a = 0.5*(body["aphelion"]+body["perihelion"])
+    e = (body["aphelion"]-body["perihelion"])/(body["aphelion"]+body["perihelion"])
+    return a,e
+
+def mean_motion(a, M_central):
+    return 2*math.pi/period(a,M_central)
+
+def period(a, M_central):
+    return 2*math.pi*math.sqrt(a**3/(G_AU3_EM_day2*M_central))
+
+def kepler_E(M,e, tol=1e-10):
+    E=M if e<0.8 else math.pi
+    for _ in range(100):
+        d=(E-e*math.sin(E)-M)/(1-e*math.cos(E))
+        E-=d
+        if abs(d)<tol:break
+    return E
+
+def true_from_E(E,e):
+    return 2*math.atan2(math.sqrt(1+e)*math.sin(E/2),
+                        math.sqrt(1-e)*math.cos(E/2))
+
+def position_at_time(body, t, M_central):
+    a,e=elements(body)
+    n = mean_motion(a, M_central)
+    M = body["M0"] + n*t
+    E = kepler_E(M% (2*math.pi), e)
+    theta = true_from_E(E,e)
+    r = a*(1-e**2)/(1+e*math.cos(theta))
+    return np.array([r*math.cos(theta), r*math.sin(theta)])
+
+def position_circle(body,t,M_central):
+    a,_=elements(body)
+    T=period(a,M_central)
+    theta=body["M0"]+2*math.pi*t/T
+    return np.array([a*math.cos(theta),a*math.sin(theta)])
+
+# ──────────────────────────────────────────────────────────────────────────────
+#   Trajectory pre‑compute (parallel with progress bar)
+# ──────────────────────────────────────────────────────────────────────────────
+def compute_one(body, t_array, M_central, elliptical):
+    if elliptical:
+        return np.stack([position_at_time(body,t,M_central) for t in t_array])
+    return np.stack([position_circle(body,t,M_central) for t in t_array])
+
+def precompute(bodies,total_days,dt, M_central, elliptical):
+    t_arr=np.arange(0,total_days+dt,dt)
+    traj=np.zeros((len(bodies),len(t_arr),2))
+    with ProcessPoolExecutor() as ex:
+        futures={ex.submit(compute_one,b,t_arr,M_central,elliptical):i
+                 for i,b in enumerate(bodies)}
+        for fut in tqdm(as_completed(futures),
+                        total=len(futures),
+                        desc="computing orbits",
+                        unit="planet"):
+            i=futures[fut]
+            traj[i]=fut.result()
+    return t_arr,traj
+
+# ──────────────────────────────────────────────────────────────────────────────
+#   Plotting & animation
+# ──────────────────────────────────────────────────────────────────────────────
+def static_overview(ax,bodies,elliptical):
+    cmap=plt.cm.plasma
+    colors=cmap(np.linspace(0.15,0.95,len(bodies)))
+    lim=0
+    for body,c in zip(bodies,colors):
+        a,e=elements(body)
+        if elliptical:
+            th=np.linspace(0,2*math.pi,400)
+            r=a*(1-e**2)/(1+e*np.cos(th))
+            ax.plot(r*np.cos(th),r*np.sin(th),'--',color=c,alpha=0.4)
         else:
-            self.a = self.e = None
+            circ=plt.Circle((0,0),a,fill=False,ls='--',color=c,alpha=0.4)
+            ax.add_patch(circ)
+        lim=max(lim,body["aphelion"])
+        # starting dot
+        pos=position_at_time(body,0,1) if elliptical else np.array([a,0])
+        ax.scatter(*pos,color=c,s=30,label=body["name"])
+    ax.scatter(0,0,color='gold',s=120,zorder=5,label="Sun")
+    ax.set_aspect('equal')
+    ax.set_xlabel("AU"); ax.set_ylabel("AU")
+    ax.set_xlim(-1.1*lim,1.1*lim); ax.set_ylim(-1.1*lim,1.1*lim)
+    ax.legend(fontsize=7,loc='upper right')
 
-        # Placeholder for dynamic state (position, velocity) if needed
-        self.position = None
-        self.velocity = None
+def animate(bodies,t_arr,traj,elliptical,save=False):
+    cmap=plt.cm.plasma
+    colors=cmap(np.linspace(0.15,0.95,len(bodies)))
+    orbits=[period(elements(b)[0],1) for b in bodies]
 
-class SolarSystem:
-    def __init__(self, data_folder="systems/solar_system", use_cache=True):
-        self.data_folder = data_folder
-        self.bodies = []      # list of CelestialBody objects for planets
-        self.star = None      # CelestialBody for the sun/star
-        self.epoch = None
-        self.units = {"distance": "AU", "time": "day", "mass": "EarthMass"}  # default units
-        # Load data and prepare orbits:
-        self._load_system_data()
-        if use_cache:
-            loaded = self._load_cached_orbits()
-        else:
-            loaded = False
-        if not loaded:
-            self._compute_initial_states()
-            # Optionally precompute orbital trajectories for a default duration if needed
-            # (The actual duration and step could be determined by simulation needs)
-            # e.g., self.precompute_orbits(total_days=365*5, step=1.0)
-            # Save to cache for future use
-            self._save_orbit_cache()
+    fig,ax=plt.subplots(figsize=(6,6),facecolor='k')
+    fig.patch.set_facecolor('k')
+    ax.set_facecolor('k')
+    static_overview(ax,bodies,elliptical)  # draws orbits faintly
 
-    def _load_system_data(self):
-        """Read sun file, bodies file, and metadata (if exists)."""
-        # Read star data
-        star_data = read_sun_file(f"{self.data_folder}/sun.txt")
-        # Example: star_data could be dict with keys 'mass' and 'radius'
-        self.star = CelestialBody(name="Sun", mass=star_data["mass"], radius=star_data["radius"])
-        # Read optional metadata (units, epoch)
-        meta = read_metadata(f"{self.data_folder}/metadata.txt")
-        if meta:
-            self.epoch = meta.get("epoch", None)
-            # Update units if provided (e.g., use different distance unit and adjust values accordingly)
-            self._apply_unit_conversions(meta)
-        # Read planets data from CSV
-        bodies_data = read_bodies_file(f"{self.data_folder}/bodies.csv")
-        for body in bodies_data:
-            name = body["name"]
-            mass = body["mass"]
-            radius = body["radius"]
-            ap = body["aphelion"]
-            per = body["perihelion"]
-            anomaly = body["mean_anomaly"]
-            # Convert anomaly to radians for internal use if it’s in degrees
-            mean_anomaly_rad = np.deg2rad(anomaly) if meta and meta.get("angle_unit","deg") == "deg" else anomaly
-            planet = CelestialBody(name, mass, radius, ap, per, mean_anomaly_rad)
-            self.bodies.append(planet)
+    pts=[ax.plot([],[],'o',color=c)[0] for c in colors]
+    trails=[ax.plot([],[],'-',color=c,lw=1)[0] for c in colors]
+    txts=[ax.text(0,0,'',color=c,fontsize=8,ha='left',va='bottom')
+          for c in colors]
 
-    def _apply_unit_conversions(self, meta):
-        """Convert loaded values to internal base units (AU, day, EarthMass)."""
-        # For example, if metadata specifies distance in km, convert all distances to AU.
-        # (1 AU ~ 149,597,870.7 km). Similarly for mass (if given in SolarMass, convert to EarthMass, etc.)
-        # Pseudocode:
-        if meta.get("distance_unit") and meta["distance_unit"] != "AU":
-            factor = ...  # determine conversion factor to AU
-            self.star.radius *= factor
-            # Also convert each body's radius, aphelion, perihelion
-            for body in self.bodies:
-                body.radius *= factor
-                body.aphelion *= factor
-                body.perihelion *= factor
-        if meta.get("mass_unit") and meta["mass_unit"] != "EarthMass":
-            m_factor = ...  # conversion to Earth masses
-            self.star.mass *= m_factor
-            for body in self.bodies:
-                body.mass *= m_factor
-        # time_unit can be handled in simulation (affects gravitational constant, etc.)
-        self.units.update({k: meta[k] for k in ["distance_unit","time_unit","mass_unit"] if k in meta})
+    def init():
+        for p,t,l in zip(pts,trails,txts):
+            p.set_data([],[])
+            t.set_data([],[])
+            l.set_text('')
+        return pts+trails+txts
 
-    def _compute_initial_states(self):
-        """Compute initial position (and velocity) for each planet at epoch."""
-        for planet in self.bodies:
-            # Calculate initial position in 2D plane.
-            # Assume orbit lies in XY-plane with Sun at (0,0).
-            # Determine true anomaly from mean anomaly (solve Kepler's equation if needed for high accuracy).
-            M = planet.mean_anomaly
-            e = planet.e
-            a = planet.a
-            if e and e < 1e-6:
-                # nearly circular, treat true anomaly ~ mean anomaly for simplicity
-                true_anom = M
-            elif e:
-                # Solve Kepler's equation for E (eccentric anomaly) via iteration (Newton's method)
-                E = M if e < 0.8 else np.pi  # initial guess
-                for _ in range(100):
-                    dE = (M - (E - e*np.sin(E))) / (1 - e*np.cos(E))
-                    E += dE
-                    if abs(dE) < 1e-8:
-                        break
-                true_anom = 2 * np.arctan2(np.sqrt(1+e)*np.sin(E/2), np.sqrt(1-e)*np.cos(E/2))
-            else:
-                true_anom = M  # If circular or e not defined (for sun)
-            # Distance from focus at true anomaly (for ellipse: r = a*(1 - e^2) / (1 + e*cos(theta)))
-            r = planet.a * (1 - planet.e**2) / (1 + planet.e * np.cos(true_anom)) if planet.e is not None else 0
-            # Compute coordinates (x, y)
-            x = r * np.cos(true_anom)
-            y = r * np.sin(true_anom)
-            planet.position = np.array([x, y])
-            # Compute orbital velocity vector for planet (if needed for integration):
-            # For elliptical orbit, orbital speed v = sqrt(G*M_sun*(2/r - 1/a)).
-            # Direction is perpendicular to radius vector at perihelion.
-            # (For simplicity, assume initial velocity is perpendicular to position vector.)
-            if planet.e is not None:
-                mu = compute_gravitational_param(self.star.mass)  # G*M_sun in appropriate units
-                speed = np.sqrt(mu * (2/r - 1/planet.a))
-                # Velocity direction: perpendicular to radius (90 degrees ahead of true anomaly for prograde orbit)
-                vx = -speed * np.sin(true_anom)
-                vy =  speed * np.cos(true_anom)
-                planet.velocity = np.array([vx, vy])
-        # (After this, each planet has initial position and velocity set)
+    def update(frame):
+        for i,(p,t,l) in enumerate(zip(pts,trails,txts)):
+            px,py=traj[i,frame]
+            p.set_data([px],[py])
+            # trail:
+            t.set_data(traj[i,:frame+1,0],traj[i,:frame+1,1])
+            n_orb=int(t_arr[frame]//orbits[i])
+            label=bodies[i]["name"]+ (f" ×{n_orb}" if n_orb>0 else "")
+            l.set_text(label)
+            l.set_position((px*1.05,py*1.05))
+        return pts+trails+txts
 
-    def precompute_orbits(self, total_time_days, time_step=1.0):
-        """Precompute positions (and velocities) for each planet at each time step up to total_time."""
-        num_steps = int(total_time_days / time_step) + 1
-        times = np.linspace(0, total_time_days, num_steps)  # time 0 to total_time
-        # Initialize arrays for positions
-        all_positions = np.zeros((len(self.bodies), num_steps, 2))
-        # (If velocity tracking needed: all_velocities = np.zeros((len(self.bodies), num_steps, 2)))
-        for i, planet in enumerate(self.bodies):
-            # Using orbital elements to compute position at each time
-            if planet.e is not None:
-                # mean motion n = 2π / T (T can be derived from a^3 ~ (M_sun) and time unit)
-                mu = compute_gravitational_param(self.star.mass)
-                # Kepler's third law: T^2 = 4π^2 * a^3 / mu  -> T in days
-                period = 2*np.pi * np.sqrt(planet.a**3 / mu)
-                n = 2 * np.pi / period  # mean motion (rad/day)
-                M0 = planet.mean_anomaly
-                for j, t in enumerate(times):
-                    M = M0 + n * t
-                    # solve for true anomaly similarly as above
-                    # ... (compute E, then true_anom, then r, then x,y)
-                    # assign to all_positions[i, j, :] = [x, y]
-            else:
-                # If no orbital data (e.g., star), just skip or set position [0,0].
-                all_positions[i, :, :] = 0
-        self.orbit_cache = {"times": times, "positions": all_positions}
-        # (One could also store velocities if needed)
+    ani=FuncAnimation(fig,update,frames=len(t_arr),
+                      init_func=init,interval=30,blit=True)
+    if save:
+        ani.save("orbit_anim.gif",writer="pillow",fps=30)
+        print("GIF saved to orbit_anim.gif")
+    plt.show()
 
-    def _load_cached_orbits(self):
-        """Attempt to load precomputed orbit positions from file."""
-        cache_path = f"{self.data_folder}/orbit_cache.npz"
-        try:
-            data = load_orbit_cache(cache_path)
-            if data:
-                # Assume cache contains 'positions' and possibly 'times'
-                self.orbit_cache = {"times": data["times"], "positions": data["positions"]}
-                return True
-        except FileNotFoundError:
-            return False
-        return False
+# ──────────────────────────────────────────────────────────────────────────────
+#   Main
+# ──────────────────────────────────────────────────────────────────────────────
+def main():
+    ap=argparse.ArgumentParser(epilog="example: python solar_system.py --ellipse --years 10")
+    mode=ap.add_mutually_exclusive_group()
+    mode.add_argument('--ellipse',dest='ellip',action='store_true')
+    mode.add_argument('--circular',dest='ellip',action='store_false')
+    ap.set_defaults(ellip=True)
+    ap.add_argument('--years',type=float,default=5,help="simulation length in Earth years")
+    ap.add_argument('--dt',type=float,default=1,help="time step (days)")
+    ap.add_argument('--system',default='systems/solar_system',help="data folder")
+    ap.add_argument('--static',action='store_true',help="only build static PNG")
+    args=ap.parse_args()
 
-    def _save_orbit_cache(self):
-        """Save the precomputed orbits to a cache file for faster reload next time."""
-        if hasattr(self, "orbit_cache"):
-            save_orbit_cache(f"{self.data_folder}/orbit_cache.npz", self.orbit_cache)
+    folder=Path(args.system)
+    if not folder.exists(): sys.exit(f"folder {folder} not found")
 
-    def get_body_position(self, name, time_index):
-        """Retrieve position of a given body at a specific time index (from precomputed cache)."""
-        if not hasattr(self, "orbit_cache"):
-            raise RuntimeError("Orbit cache not computed. Call precompute_orbits first.")
-        # Find index of body in list
-        for i, body in enumerate(self.bodies):
-            if body.name.lower() == name.lower():
-                return self.orbit_cache["positions"][i, time_index]
-        return None
+    meta=read_simple_kv(folder/"metadata.txt")
+    meta.setdefault("distance_unit","AU")
+    meta.setdefault("mass_unit","EarthMass")
+    meta.setdefault("angle_unit","deg")
+
+    sun=load_sun(folder,meta)
+    bodies=load_bodies(folder,meta)
+
+    # 1. static figure always
+    plt.style.use('dark_background')
+    fig,ax=plt.subplots(figsize=(6,6))
+    static_overview(ax,bodies,args.ellip)
+    fig.savefig("orbit_overview.png",dpi=200,bbox_inches='tight')
+    print("Static plot saved to orbit_overview.png")
+    if args.static:
+        return
+
+    # 2. pre‑compute trajectories
+    total_days=args.years*365
+    t_arr,traj=precompute(bodies,total_days,args.dt,
+                          M_central=sun["mass"],elliptical=args.ellip)
+
+    # 3. animate
+    animate(bodies,t_arr,traj,args.ellip,save=True)
+
+if __name__=="__main__":
+    main()
