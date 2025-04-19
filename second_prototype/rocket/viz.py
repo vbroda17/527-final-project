@@ -2,6 +2,7 @@ import numpy as np, matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.collections import LineCollection
 from matplotlib import cm
+import matplotlib.pyplot as plt
 plt.style.use('dark_background')
 
 def _v_colors(path, speeds):
@@ -40,11 +41,6 @@ def snapshot(sim, rocket, fname="rocket/snapshot.png"):
     fig.tight_layout(); fig.savefig(fname,dpi=160); plt.close(fig)
 
 def animate(sim, rocket, fname="rocket/flight.gif"):
-    import numpy as np, matplotlib.pyplot as plt
-    from matplotlib.animation import FuncAnimation
-    from matplotlib.collections import LineCollection
-    from matplotlib import cm
-
     # --- data ------------------------------------------------------------
     path   = np.vstack(rocket.path)
     speeds = np.linalg.norm(np.diff(path, axis=0), axis=1) / sim.dt

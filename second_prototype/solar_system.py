@@ -31,12 +31,23 @@ import numpy as np, math
 from pathlib import Path
 
 # ──────────────────────────────────────────────────────────────────────────────
-#   Unit conversion helpers (same as before)
+#   Unit conversion helpers
 # ──────────────────────────────────────────────────────────────────────────────
 AU_KM          = 1.495_978_707e8          # km
 EARTH_MASS_KG  = 5.9722e24
 SOLAR_MASS_EM  = 332_946.0
 DEG2RAD        = math.pi / 180.0
+
+# --- canonical factors -------------------------------------------------
+AU_KM  = 1.495978707e8               # km in one AU
+DAY_S  = 86400.0                     # s in one day
+
+# --- handy converters --------------------------------------------------
+km_to_AU      = 1.0 / AU_KM
+AU_to_km      = AU_KM
+kms_to_AUday  = DAY_S / AU_KM        # convert km/s  →  AU/day
+AUday_to_kms  = AU_KM / DAY_S        # convert AU/day → km/s
+mps2_to_AUday2 = (DAY_S**2) / (AU_KM*1e3)
 
 def dist_to_au(val: float, unit: str) -> float:
     u = unit.lower()

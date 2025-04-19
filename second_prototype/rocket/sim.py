@@ -1,6 +1,7 @@
 import numpy as np
 from solar_system import build_sim
 from rocket import Rocket
+from tqdm import tqdm
 
 class RocketSim:
     def __init__(self, years=3, dt=1.0, elliptical=True):
@@ -9,20 +10,18 @@ class RocketSim:
         self.rockets = []
 
     # ── add rockets ─────────────────────────────────────────────
-    def add_rocket(self, r0, v0, thrust=np.zeros(2)):
-        rk      = Rocket(r0.astype(float), v0.astype(float), thrust.astype(float))
-        rk.sim  = self             # <‑‑ back‑reference used inside Rocket.step
+    def add_rocket(self, r0, v0, mass, max_thrust):
+        rk = Rocket(mass, r0.astype(float), v0.astype(float), max_thrust)
+        rk.sim = self
         rk.record()
         self.rockets.append(rk)
         return rk
 
     # ── loop ────────────────────────────────────────────────────
-    def run(self, n_steps, progress=True):
-        from tqdm import tqdm
-        rng = tqdm(range(n_steps), desc="propagating rockets") if progress else range(n_steps)
-        for _ in rng:
-            # advance each rocket
+    def run(self, n_steps, controller, progress=True):
+        rng = tqdm(range(n_steps)) if progress else range(n_steps)
+        for step in rng:
             for rk in self.rockets:
+                rk.throttle, rk.angle = controller(step, rk, self)
                 rk.step(self.dt)
-            # advance planet index
             self.grav.step()

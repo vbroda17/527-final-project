@@ -7,56 +7,50 @@ if TYPE_CHECKING:
 
 @dataclass
 class Rocket:
-    r: np.ndarray          # position  (AU)
-    v: np.ndarray          # velocity  (AU/day)
-    thrust: np.ndarray     # constant accel (AU/day²)
-    path: list = field(default_factory=list)
-    sim: "RocketSim" = field(default=None, repr=False)     # ← NEW
+    mass: float                 # kg (constant for now)
+    r: np.ndarray               # AU
+    v: np.ndarray               # AU/day
+    max_thrust: float           # Newton
+    sim: "RocketSim" = field(repr=False, default=None)
+
+    path:  list = field(default_factory=list)
+    speed: list = field(default_factory=list)
+
+    # -------- control updated externally each step -------
+    throttle: float = 0.0       # 0‑1
+    angle:    float = 0.0       # rad (0 = +x)
 
     def record(self):
         self.path.append(self.r.copy())
+        self.speed.append(np.linalg.norm(self.v))
 
-    # one RK2 step in the inertial frame
+    def accel_thrust(self):
+        # convert N/kg to AU/day²
+        a_si = (self.max_thrust * self.throttle) / self.mass     # m/s²
+        return a_si * 86400**2 / (1.495978707e11) * np.array([np.cos(self.angle),
+                                                              np.sin(self.angle)])
+
     def step(self, dt):
-        # ------------------------------------------------- 1. check for capture
-        bodies_xy = self.sim.grav.get_positions()            # (N,2)
+        # ----- capture logic identical to previous version -----
+        bodies_xy = self.sim.grav.get_positions()
         sun_xy    = np.zeros(2)
         all_xy    = np.vstack([sun_xy, bodies_xy])
-        # capture radii (AU):  Sun = 0.03,  planets = body_radius + 5e‑4
         radii = np.array(
             [0.03] + [b["radius"] + 5e-4 for b in self.sim.grav.bodies]
         )
-
-        rel = all_xy - self.r              # (N,2)
+        rel = all_xy - self.r
         d   = np.linalg.norm(rel, axis=1)
-        hit = np.where(d <= radii)[0]      # indices of bodies we touch
+        hit = np.where(d <= radii)[0]
+        if hit.size:
+            k = hit[0]; self.r = all_xy[k].copy(); self.v[:] = 0; self.throttle = 0
+            self.record(); return
 
-        if hit.size:                       # we hit the first in the list
-            k = hit[0]
-            target_xy = all_xy[k]
-            # ------------------------------------------------- lock on
-            self.r = target_xy.copy()
-            # adopt body's velocity (Sun's is 0)
-            if k == 0:
-                self.v[:] = 0.0
-            else:
-                # planet velocity from trajectory difference
-                j = k - 1                  # planet index in traj
-                i = self.sim.grav.i
-                # finite‑difference orbit velocity (1‑frame look‑ahead)
-                nxt = (i + 1) % self.sim.grav.N_steps
-                self.v = (self.sim.grav.traj[j, nxt] -
-                        self.sim.grav.traj[j, i]) / self.sim.dt
-            self.thrust[:] = 0.0           # thrust off while attached
-            self.record()
-            return                         # skip free‑flight physics
-
-        # ------------------------------------------- 2. normal RK2 free flight
-        a_g = self.sim.grav.gravity_accel(self.r)
-        a   = a_g + self.thrust
-        v_half = self.v + 0.5 * a * dt
+        # ----- RK2 with thrust --------------------------------
+        def grav(p): return self.sim.grav.gravity_accel(p)
+        a0 = grav(self.r) + self.accel_thrust()
+        v_half = self.v + 0.5 * a0 * dt
         r_half = self.r + 0.5 * self.v * dt
-        a_half = self.sim.grav.gravity_accel(r_half) + self.thrust
+        a_half = grav(r_half) + self.accel_thrust()
         self.v += a_half * dt
         self.r += v_half * dt
         self.record()
