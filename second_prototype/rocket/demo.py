@@ -5,14 +5,14 @@ import numpy as np, os, multiprocessing as mp
 
 def controller(step, rk, sim):
     # first 5 steps: 100% throttle straight down
-    # if step < 5:
-    #     return 1.0, -np.pi/2           # huge downward kick
+    if step < 5:
+        return 2.0, -np.pi/2           # huge downward kick
     # afterwards let optimiser decide; here just coast
     return 0.0, rk.angle
 
 def main():
     os.makedirs("rocket", exist_ok=True)
-    sim = RocketSim(years=3, dt=1.0, elliptical=True)
+    sim = RocketSim(years=1, dt=1.0, elliptical=True)
 
     earth_idx,_ = sim.grav.get_body("Earth")
     r0 = sim.grav.traj[earth_idx,0].copy()
