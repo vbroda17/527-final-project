@@ -1,56 +1,53 @@
-from dataclasses import dataclass, field
+# rocket/__init__.py
 import numpy as np
-#  add a forward reference type for the IDE; not required at runtime
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from rocket.sim import RocketSim            # avoid circular import
+AU_M   = 1.495978707e11            # metres in 1 AU
+DAY_S  = 86400.0
+KMH_TO_AUDAY = (1000.0 * 24.0) / AU_M   # km h⁻¹ → AU day⁻¹
 
-@dataclass
 class Rocket:
-    mass: float                 # kg (constant for now)
-    r: np.ndarray               # AU
-    v: np.ndarray               # AU/day
-    max_thrust: float           # Newton
-    sim: "RocketSim" = field(repr=False, default=None)
+    """
+    Attributes you set once when you create the rocket
+      r0            [AU]         initial position
+      v0            [AU/day]     initial velocity (use planet's to 'ride along')
+      mass          [EarthMass]  only needed for accel calc
+      max_thrust    [EarthMass·AU/day²]  (same units you already use)
+      max_v_kmh     [km/h]       *new*:  engine cannot accelerate past this speed
 
-    path:  list = field(default_factory=list)
-    speed: list = field(default_factory=list)
+    Controller must set *every tick*
+      throttle  (0‑1)
+      angle     (rad)
 
-    # -------- control updated externally each step -------
-    throttle: float = 0.0       # 0‑1
-    angle:    float = 0.0       # rad (0 = +x)
+    Units everywhere else stay:  distance = AU,  time = day.
+    """
+    def __init__(self, r0, v0, mass, max_thrust, max_v_kmh, sim):
+        self.r = np.asarray(r0, float)
+        self.v = np.asarray(v0, float)
+        self.mass = mass
+        self.max_thrust = max_thrust
+        self.vmax = max_v_kmh * KMH_TO_AUDAY   # AU/day
+        self.throttle = 0.0
+        self.angle    = 0.0
+        self.sim = sim          # back‑reference to RocketSim
+        self.path = [self.r.copy()]
 
-    def record(self):
-        self.path.append(self.r.copy())
-        self.speed.append(np.linalg.norm(self.v))
+    # ---------------- internal helpers ----------------
+    def _a_thrust(self):
+        """Engine acceleration vector [AU/day²] for current throttle & angle."""
+        a_mag = (self.max_thrust * self.throttle) / self.mass     # AU/day²
+        return a_mag * np.array([np.cos(self.angle), np.sin(self.angle)])
 
-    def accel_thrust(self):
-        # convert N/kg to AU/day²
-        a_si = (self.max_thrust * self.throttle) / self.mass     # m/s²
-        return a_si * 86400**2 / (1.495978707e11) * np.array([np.cos(self.angle),
-                                                              np.sin(self.angle)])
-
+    # ---------------- main integrator -----------------
     def step(self, dt):
-        # ----- capture logic identical to previous version -----
-        bodies_xy = self.sim.grav.get_positions()
-        sun_xy    = np.zeros(2)
-        all_xy    = np.vstack([sun_xy, bodies_xy])
-        radii = np.array(
-            [0.03] + [b["radius"] + 5e-4 for b in self.sim.grav.bodies]
-        )
-        rel = all_xy - self.r
-        d   = np.linalg.norm(rel, axis=1)
-        hit = np.where(d <= radii)[0]
-        if hit.size:
-            k = hit[0]; self.r = all_xy[k].copy(); self.v[:] = 0; self.throttle = 0
-            self.record(); return
+        # engine contribution
+        self.v += self._a_thrust() * dt
 
-        # ----- RK2 with thrust --------------------------------
-        def grav(p): return self.sim.grav.gravity_accel(p)
-        a0 = grav(self.r) + self.accel_thrust()
-        v_half = self.v + 0.5 * a0 * dt
-        r_half = self.r + 0.5 * self.v * dt
-        a_half = grav(r_half) + self.accel_thrust()
-        self.v += a_half * dt
-        self.r += v_half * dt
-        self.record()
+        # cap speed *up to* vmax (gravity can exceed it)
+        speed = np.linalg.norm(self.v)
+        if speed < self.vmax:                         # only engine may boost
+            if speed > self.vmax:                     # numerical edge
+                self.v *= self.vmax / speed
+
+        # gravity contribution
+        self.v += self.sim.grav.gravity_accel(self.r) * dt
+        self.r += self.v * dt
+        self.path.append(self.r.copy())

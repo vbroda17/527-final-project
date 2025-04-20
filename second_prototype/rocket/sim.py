@@ -10,10 +10,8 @@ class RocketSim:
         self.rockets = []
 
     # ── add rockets ─────────────────────────────────────────────
-    def add_rocket(self, r0, v0, mass, max_thrust):
-        rk = Rocket(mass, r0.astype(float), v0.astype(float), max_thrust)
-        rk.sim = self
-        rk.record()
+    def add_rocket(self, r0, v0, mass, max_thrust, max_v_kmh):
+        rk = Rocket(r0, v0, mass, max_thrust, max_v_kmh, self)
         self.rockets.append(rk)
         return rk
 
