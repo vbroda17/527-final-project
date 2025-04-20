@@ -141,9 +141,9 @@ def main():
     os.makedirs("rocket_output", exist_ok=True)
 
     # build one shared sim so all helpers see the same ephemeris
-    global total_steps                                      # ← CHANGED
-    sim = RocketSim(years=RUN_YEARS, dt=DT, elliptical=True) # ← CHANGED
-    total_steps = int(RUN_YEARS * 365 / DT)                  # ← CHANGED
+    global total_steps                                     
+    sim = RocketSim(years=RUN_YEARS, dt=DT, elliptical=True)
+    total_steps = int(RUN_YEARS * 365 / DT)                 
 
     # -----------------------------------
     # uncomment ONE of the following lines
