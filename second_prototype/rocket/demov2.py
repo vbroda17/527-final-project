@@ -2,12 +2,20 @@
 """
 Run with
     python -m rocket.demo
-Everything is saved to rocket_output/ (viz.py already does that).
+
+All PNG/GIF outputs land in rocket_output/ (handled by viz.py).
 """
 
 import os, multiprocessing as mp, numpy as np
 from rocket.sim import RocketSim
 from rocket import viz
+
+# =========================================================================
+#  GLOBAL SIMULATION SETTINGS  -------------------------------------------                         ← CHANGED
+# =========================================================================
+RUN_YEARS = 2          # how long to simulate (floats OK, e.g. 1.75)    ← CHANGED
+DT        = 1.0          # integration step in *days*                     ← CHANGED
+# =========================================================================
 
 
 # =========================================================================
@@ -28,7 +36,8 @@ def start_pos(sim, start):
 def add_ship(sim, start, vmax_kmh=30_000, mass=2.0, max_thrust=1e-3):
     """Create a rocket with chosen MAX speed (engine throttle 0‑1 sets fraction)."""
     r0, v0 = start_pos(sim, start)
-    return sim.add_rocket(r0, v0, mass=mass, max_thrust=max_thrust, max_v_kmh=vmax_kmh)
+    return sim.add_rocket(r0, v0,
+                          mass=mass, max_thrust=max_thrust, max_v_kmh=vmax_kmh)
 
 
 # =========================================================================
@@ -64,12 +73,10 @@ def lead_body(body, lead_factor=0.05, throttle=1.0):
     def ctrl(step, rk, sim):
         idx, _ = sim.grav.get_body(body)
         pos = sim.grav.traj[idx, sim.grav.i]
-        vel = (sim.grav.traj[idx, (sim.grav.i+1)%sim.grav.N_steps] - pos)/sim.dt
-        dx, dy = pos - rk.r
-        dist = np.hypot(dx, dy)
+        vel = (sim.grav.traj[idx, (sim.grav.i+1)%sim.grav.N_steps] - pos) / sim.dt
+        dist = np.linalg.norm(pos - rk.r)
         tgt = pos + vel * dist * lead_factor
-        tx, ty = tgt - rk.r
-        angle = np.arctan2(ty, tx)
+        angle = np.arctan2(*(tgt - rk.r)[::-1])
         return throttle, angle
     return ctrl
 
@@ -80,9 +87,7 @@ def fixed_direction(angle_rad, throttle=1.0, burn_days=None):
     If burn_days is given, throttle=0 after that many steps.
     """
     def ctrl(step, rk, sim):
-        thr = throttle
-        if burn_days is not None and step >= burn_days:
-            thr = 0.0
+        thr = throttle if (burn_days is None or step < burn_days) else 0.0
         return thr, angle_rad
     return ctrl
 
@@ -90,45 +95,42 @@ def fixed_direction(angle_rad, throttle=1.0, burn_days=None):
 def dir_keyword(name, throttle=1.0, burn_days=None):
     mapping = {"right": 0, "up": np.pi/2, "left": np.pi, "down": -np.pi/2}
     if name not in mapping:
-        raise ValueError("dir_keyword must be one of right, up, left, down")
+        raise ValueError("dir_keyword must be right, up, left or down")
     return fixed_direction(mapping[name], throttle, burn_days)
 
 
 # =========================================================================
 #  DEMO SCENARIOS ---------------------------------------------------------
 # =========================================================================
-def demo_single_ship():
+def demo_single_ship(sim):
     """
     One rocket on Earth: burn 20 days toward Mars, then coast.
     """
-    sim = RocketSim(years=2, dt=1.0)
-    rk  = add_ship(sim, start="Earth")
+    rk = add_ship(sim, start="Earth")
     controller = lead_body("Mars", lead_factor=0.08, throttle=1.0)
-    sim.run(365, controller)
+    sim.run(total_steps, controller)
     viz.static(sim, rk); viz.snapshot(sim, rk); viz.animate(sim, rk)
 
 
-def demo_retrograde_brake():
+def demo_retrograde_brake(sim):
     """
     Fire retrograde for 50 days to drop into lower solar orbit.
     """
-    sim = RocketSim(years=1, dt=1.0)
-    rk  = add_ship(sim, start="Earth", vmax_kmh=20_000)
+    rk = add_ship(sim, start="Earth", vmax_kmh=20_000)
     controller = retrograde(throttle=0.8)
-    sim.run(200, controller)
+    sim.run(total_steps, controller)
     viz.animate(sim, rk, fname="retrograde.gif")
 
 
-def demo_vertical_rail():
+def demo_vertical_rail(sim):
     """
     5 rockets along x = -1 .. 1 AU at y = +1.8 AU, all thrust straight down.
     """
-    sim = RocketSim(years=0.5, dt=1.0)
     xs = np.linspace(-1.0, 1.0, 5)
     rockets = [add_ship(sim, start=(x, 1.8)) for x in xs]
-    controller = dir_keyword("down", throttle=1.0, burn_days=None)
-    sim.run(180, controller)
-    for i,rk in enumerate(rockets):
+    controller = dir_keyword("down", throttle=1.0)
+    sim.run(total_steps, controller)
+    for i, rk in enumerate(rockets):
         viz.animate(sim, rk, fname=f"rail_{i}.gif")
 
 
@@ -138,12 +140,18 @@ def demo_vertical_rail():
 def main():
     os.makedirs("rocket_output", exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # EXACTLY ONE of the following lines should be uncommented at a time
-    # ------------------------------------------------------------------
-    # demo_single_ship()
-    # demo_retrograde_brake()
-    demo_vertical_rail()
+    # build one shared sim so all helpers see the same ephemeris
+    global total_steps                                      # ← CHANGED
+    sim = RocketSim(years=RUN_YEARS, dt=DT, elliptical=True) # ← CHANGED
+    total_steps = int(RUN_YEARS * 365 / DT)                  # ← CHANGED
+
+    # -----------------------------------
+    # uncomment ONE of the following lines
+    # -----------------------------------
+    demo_single_ship(sim)
+    # demo_retrograde_brake(sim)
+    # demo_vertical_rail(sim)
 
 if __name__ == "__main__":
-    mp.freeze_support(); main()
+    mp.freeze_support()
+    main()

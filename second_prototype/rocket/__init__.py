@@ -29,6 +29,7 @@ class Rocket:
         self.angle    = 0.0
         self.sim = sim          # back‑reference to RocketSim
         self.path = [self.r.copy()]
+        self.landed = False
 
     # ---------------- internal helpers ----------------
     def _a_thrust(self):
@@ -38,16 +39,25 @@ class Rocket:
 
     # ---------------- main integrator -----------------
     def step(self, dt):
+        if self.landed:
+            self.path.append(self.r.copy())
+            return
+        
         # engine contribution
-        self.v += self._a_thrust() * dt
+        self.v = self.vmax * self.throttle * np.array([np.cos(self.angle),
+                                                       np.sin(self.angle)])
 
-        # cap speed *up to* vmax (gravity can exceed it)
-        speed = np.linalg.norm(self.v)
-        if speed < self.vmax:                         # only engine may boost
-            if speed > self.vmax:                     # numerical edge
-                self.v *= self.vmax / speed
-
-        # gravity contribution
+        # gravity
         self.v += self.sim.grav.gravity_accel(self.r) * dt
         self.r += self.v * dt
+
+        # collision: Sun + planets
+        bodies_xy = self.sim.grav.get_positions()
+        all_xy = np.vstack([np.zeros(2), bodies_xy])        # Sun at 0,0
+        radii = np.array([0.03] + [b["radius"] + 5e-4 for b in self.sim.grav.bodies])
+        if (np.linalg.norm(all_xy - self.r, axis=1) <= radii).any():
+            self.landed = True
+            self.throttle = 0.0
+            self.v[:] = 0.0
+
         self.path.append(self.r.copy())
