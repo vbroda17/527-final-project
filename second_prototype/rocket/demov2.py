@@ -20,7 +20,7 @@ from rocket import viz
 
 # ─────────────────────────────────────────────────────────── global knobs
 RUN_YEARS = 3.5                   # length of each sim
-DT        = 1.0                    # days per step
+DT        = .5                    # days per step
 OUT_DIR   = "rocket_output"
 
 # ─────────────────────────────────────────────────────────── helpers

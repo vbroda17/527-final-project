@@ -22,3 +22,10 @@ Used to test out diferent controllers and to try and fine tune the rocket. Runs 
     A. Implement trail decay
     B. Implement Food sources
     C. Implement Fitness function for food source
+
+## Obj
+fintess have entire orbit as food source, calculate actuall fintess based on real location of the planet
+Random food as like astroids appear on and near orbit as well, more static value
+Try without graviity on all bees, then consider trying with later
+
+# add calculations being saved to like npy files
