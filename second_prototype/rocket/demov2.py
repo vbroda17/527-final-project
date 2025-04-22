@@ -131,11 +131,11 @@ def main():
     os.makedirs(OUT_DIR,exist_ok=True)
 
     # run every demo; comment out to skip
-    demo_single_ship("Venus","Earth")
-    demo_retrograde_brake("Earth")
-    demo_vertical_rail()
+    # demo_single_ship("Venus","Earth")
+    # demo_retrograde_brake("Earth")
+    # demo_vertical_rail()
     demo_vertical_rail_multi()
-    demo_no_gravity_ship("Earth","Mars")
+    # demo_no_gravity_ship("Earth","Mars")
 
 if __name__ == "__main__":
     mp.freeze_support(); main()
