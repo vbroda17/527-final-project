@@ -19,7 +19,7 @@ from rocket.sim import RocketSim
 from rocket import viz
 
 # ─────────────────────────────────────────────────────────── global knobs
-RUN_YEARS = 2.5                   # length of each sim
+RUN_YEARS = 3.5                   # length of each sim
 DT        = 1.0                    # days per step
 OUT_DIR   = "rocket_output"
 
@@ -66,11 +66,24 @@ def dir_keyword(name, thr=1.0):
     return lambda *_: (thr, {"right":0,"up":np.pi/2,
                              "left":np.pi,"down":-np.pi/2}[name])
 
-def no_gravity_controller(angle=0.0, thr=1.0):
-    """Controller ignoring gravity: we zero gravity for this sim."""
+# def no_gravity_controller(angle=0.0, thr=1.0):
+#     """Controller ignoring gravity: we zero gravity for this sim."""
+#     def factory(sim):
+#         sim.grav.gravity_accel = lambda r: np.zeros(2)   # monkey‑patch
+#         return lambda *_: (thr, angle)
+#     return factory
+
+# --- controller that zeroes gravity & keeps constant inertial velocity ---
+def no_grav_const(body, speed_kmh=30_000):
     def factory(sim):
-        sim.grav.gravity_accel = lambda r: np.zeros(2)   # monkey‑patch
-        return lambda *_: (thr, angle)
+        sim.grav.gravity_accel = lambda r: np.zeros(2)          # kill gravity
+        vmax = speed_kmh
+        idx,_ = sim.grav.get_body(body)
+        def ctrl(step, rk, sim):
+            dx,dy = sim.grav.traj[idx, sim.grav.i] - rk.r
+            ang = np.arctan2(dy, dx)
+            return 1.0, ang      # always full‑speed toward body
+        return ctrl
     return factory
 
 # ─────────────────────────────────────────────────────────── DEMOS
@@ -104,13 +117,12 @@ def demo_vertical_rail_multi(N=5,y=1.8,thr=1.0):
     rockets=[add_ship(sim,(x,y)) for x in xs]
     ctrl = dir_keyword("down",thr)
     sim.run(int(RUN_YEARS*365/DT), ctrl)
-    for i,rk in enumerate(rockets):
-        viz.animate(sim,rk,fname=f"rail_multi_{i}.gif")
+    viz.animate_multi(sim, rockets, fname="rail_multi.gif")     
 
 def demo_no_gravity_ship(start="Earth", dest="Mars"):
     sim  = RocketSim(years=RUN_YEARS, dt=DT)
     rk   = add_ship(sim,start)
-    ctrl = no_gravity_controller(angle=0.0)(sim)        # monkey‑patch
+    ctrl = no_grav_const(dest, 30_000)(sim) 
     sim.run(int(RUN_YEARS*365/DT), ctrl)
     viz.animate(sim,rk,fname=f"no_grav.gif")
 

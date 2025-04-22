@@ -91,3 +91,62 @@ def animate(sim, rocket, fname="flight.gif"):
                         init_func=init, interval=25, blit=True)
     ani.save(fname, writer='pillow', fps=30)
     plt.close(fig)
+
+    # ----------------------------------------------------------------------
+#  Multi‑rocket animation: one GIF with many paths & markers
+# ----------------------------------------------------------------------
+def animate_multi(sim, rockets, fname="multi.gif"):
+    from matplotlib.animation import FuncAnimation
+    import numpy as np, os
+    fname = os.path.join("rocket_output", fname)
+
+    # ---------- gather paths & speeds -----------------
+    paths   = [np.vstack(rk.path) for rk in rockets]
+    speeds  = [np.linalg.norm(np.diff(p,axis=0),axis=1)/sim.dt for p in paths]
+    vmax    = max(sp.max() for sp in speeds)
+    norm    = plt.Normalize(0, vmax)
+    cmap    = plt.cm.get_cmap("magma")
+
+    fig,ax = plt.subplots(figsize=(6,6)); fig.patch.set_facecolor('k'); ax.set_facecolor('k')
+
+    # planet orbits
+    cols = plt.cm.plasma(np.linspace(0.2,0.9,len(sim.grav.bodies)))
+    for j,c in enumerate(cols):
+        ax.plot(sim.grav.traj[j,:,0], sim.grav.traj[j,:,1],'--',color=c,alpha=0.3,lw=0.8)
+    ax.scatter(0,0,color='gold',s=90,zorder=6)
+
+    # one colour per rocket
+    rk_cols = plt.cm.tab10(np.linspace(0,1,len(rockets)))
+    trail_lines = []
+    rk_pts      = []
+    for col in rk_cols:
+        ln, = ax.plot([],[],'-',lw=1,color=col)
+        pt, = ax.plot([],[],'X',color=col,ms=6)
+        trail_lines.append(ln); rk_pts.append(pt)
+
+    lim = np.max(np.abs(sim.grav.traj[:,:,:2]))*1.3
+    ax.set_xlim(-lim,lim); ax.set_ylim(-lim,lim); ax.set_aspect('equal')
+    ax.set_xlabel("AU"); ax.set_ylabel("AU")
+
+    frames = max(len(p) for p in paths)
+
+    def init():
+        for ln,pt in zip(trail_lines,rk_pts):
+            ln.set_data([],[]); pt.set_data([],[])
+        return trail_lines + rk_pts
+
+    def update(i):
+        for p_arr, sp, ln, pt, col in zip(paths, speeds,
+                                          trail_lines, rk_pts, rk_cols):
+            if i < len(p_arr):
+                # trail segment
+                ln.set_data(p_arr[:i+1, 0], p_arr[:i+1, 1])
+                ln.set_color(cmap(norm(sp[min(i, len(sp)-1)])))
+
+                # rocket marker  – x sequence, y sequence
+                pt.set_data([p_arr[i, 0]], [p_arr[i, 1]])   # ← FIXED
+        return trail_lines + rk_pts
+
+    ani = FuncAnimation(fig,update,frames=frames,init_func=init,
+                        interval=25,blit=True)
+    ani.save(fname,writer='pillow',fps=30); plt.close(fig)
