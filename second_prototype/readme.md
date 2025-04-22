@@ -13,3 +13,12 @@ Kinda works as an orchestration. Has table of positions and such (ephemeris), lo
 Creates the vizulizattions
 ## Demo
 Used to test out diferent controllers and to try and fine tune the rocket. Runs the sims
+
+
+# FOR POSTER AND FUTURE WORK
+1. Variables: Speed of bees, number of bees (inlcluding role split), Food source, trail decay
+2. Implement Bee Colony Opt
+3. Make the variables
+    A. Implement trail decay
+    B. Implement Food sources
+    C. Implement Fitness function for food source
