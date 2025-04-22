@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-solar_system.py  –  static overview *and* animated orbits with progress bar.
+solar_system.py  –  static overview *and* animated orbits.
 
 CLI
 ----
