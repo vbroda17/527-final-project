@@ -38,7 +38,7 @@ def plot_best(colony, fname="best_path.png", out_dir=None):
 
     # best path
     ax.plot(best[:,0],best[:,1],'-',color='magenta',lw=2,label='best path')
-    ax.scatter(best[0,0],best[0,1],c='lime',marker='s',label='start')
+    # ax.scatter(best[0,0],best[0,1],c='lime',marker='s',label='start')
     ax.scatter(best[-1,0],best[-1,1],c='red',marker='*',label='end')
 
     # planet markers
