@@ -6,16 +6,14 @@ Artificial-Bee-Colony optimisation for inter-planet transfers.
 
 • Fully configurable via argparse.
 • Uses solar_system.build_sim + rocket.RocketSim.
-• Food = full destination orbit + random bonus spots.
-• Fitness = (angular proximity to dest orbit) × (1/(1+path_length)) + optional bonus.
-• Roles: employed → onlooker → scout flow each iteration.
+• Always places one “destination” food patch + N extra patches.
+• Fitness = (angular proximity) × (path-length bonus) + patch bonus.
+• Roles: employed → onlooker → scout each iteration.
+• Truncates best_path once it actually reaches the planet.
 • Outputs: bco_output/<run_id>/{fitness.csv,colony.gif,best_path.png}
 """
 
-import os
-import argparse
-import random
-import math
+import os, argparse, random, math
 import numpy as np
 from rocket.sim import RocketSim
 from bee.viz   import save_fitness, animate_colony, plot_best
@@ -23,8 +21,6 @@ from bee.viz   import save_fitness, animate_colony, plot_best
 # ----------------------------------------------------------------------------
 OUT_DIR = "bco_output"
 os.makedirs(OUT_DIR, exist_ok=True)
-
-# what fraction of the *remaining* bees (after scouts) become employed
 EMPLOYED_FRAC = 0.5
 
 # ----------------------------------------------------------------------------
@@ -32,59 +28,53 @@ def get_args():
     p = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    p.add_argument("--start",       default="Earth",
+    p.add_argument("--start",      default="Earth",
                    help="start body or 'x,y'")
-    p.add_argument("--dest",        default="Mars",
+    p.add_argument("--dest",       default="Mars",
                    help="destination body")
     p.add_argument("--years",  type=float, default=5.0,
-                   help="span of simulation in years")
-    p.add_argument("--dt",      type=float, default=1.0,
+                   help="simulation span (yrs)")
+    p.add_argument("--dt",    type=float, default=1.0,
                    help="days per step")
     p.add_argument("--move_planets", action="store_true",
                    help="advance planets each tick")
     p.add_argument("--show_orbits", action="store_true",
-                   help="animate planet markers along orbits")
+                   help="animate planet markers")
     p.add_argument("--use_gravity",  action="store_true",
                    help="apply gravity to bees")
-    p.add_argument("--n_bees",      type=int,   default=50,
+    p.add_argument("--n_bees",     type=int, default=50,
                    help="total number of bees")
-    p.add_argument("--scout_frac",  type=float, default=0.25,
-                   help="fraction of bees that are scouts")
-    p.add_argument("--speed",       type=float, default=30000,
-                   help="max bee speed (km/h)")
-    p.add_argument("--fitness", choices=["sigmoid","log","exp","linear"],
-                   default="linear",
-                   help="unused in composite, kept for legacy")
-    p.add_argument("--k",       type=float, default=5.0,
-                   help="unused steepness param")
-    p.add_argument("--extra_food", type=int, default=5,
-                   help="number of random bonus sites on dest orbit")
+    p.add_argument("--scout_frac", type=float, default=0.25,
+                   help="fraction scouts vs employed/onlooker")
+    p.add_argument("--speed",      type=float, default=30000,
+                   help="max speed (km/h)")
+    p.add_argument("--extra_food", type=int,   default=5,
+                   help="number of random extra patches on orbit")
     return p.parse_args()
 
 # ----------------------------------------------------------------------------
 def start_pos(sim, start):
-    """Return (r0, v0) in AU, AU/day from body name or literal coords."""
+    """Return (r0, v0) in AU, AU/day from a body name or 'x,y' coords."""
     if isinstance(start, str):
-        idx, _ = sim.grav.get_body(start)
-        r0 = sim.grav.traj[idx,0].copy()
-        v0 = (sim.grav.traj[idx,1] - sim.grav.traj[idx,0]) / sim.dt
+        idx,_ = sim.grav.get_body(start)
+        r0    = sim.grav.traj[idx,0].copy()
+        v0    = (sim.grav.traj[idx,1] - sim.grav.traj[idx,0]) / sim.dt
     else:
         coords = np.fromstring(start, sep=",")
-        r0 = coords.copy()
-        v0 = np.zeros(2)
+        r0     = coords.copy()
+        v0     = np.zeros(2)
     return r0, v0
 
 # ----------------------------------------------------------------------------
 class Bee:
     def __init__(self, pos, angle, speed_AUd):
         self.r           = pos.copy()
-        # initial velocity vector
         self.v           = speed_AUd * np.array([math.cos(angle),
                                                   math.sin(angle)])
         self.fit         = 0.0
-        self.trial       = 0       # for abandonment
+        self.trial       = 0
         self.path        = [self.r.copy()]
-        self.path_length = 0.0     # AU traveled
+        self.path_length = 0.0
         self.role        = None
 
 # ----------------------------------------------------------------------------
@@ -92,145 +82,147 @@ class BeeColony:
     def __init__(self, args):
         self.args = args
 
-        # partition bees into scouts / rest
-        self.N         = args.n_bees
-        self.ns        = int(args.scout_frac * self.N)
-        self.nr        = self.N - self.ns
-        self.ne        = int(EMPLOYED_FRAC * self.nr)
-        self.no        = self.nr - self.ne
+        # split into scouts, employed, onlookers
+        self.N   = args.n_bees
+        self.ns  = int(args.scout_frac * self.N)
+        self.nr  = self.N - self.ns
+        self.ne  = int(EMPLOYED_FRAC * self.nr)
+        self.no  = self.nr - self.ne
 
         # convert km/h → AU/day
         self.speed_AUd = args.speed * 1e3 * 24.0 / 1.495978707e11
 
-        # build solar system sim
+        # planetary sim
         self.sim = RocketSim(years=args.years, dt=args.dt, elliptical=True)
         if not args.use_gravity:
             self.sim.grav.gravity_accel = lambda r: np.zeros(2)
 
-        # destination orbit
-        di, _          = self.sim.grav.get_body(args.dest)
-        self.orbit     = self.sim.grav.traj[di,:,:2]       # (M,2)
-        M               = self.orbit.shape[0]
-        # precompute angular‐distance weights
+        # compute straight-line distance D and threshold = 1.2*D
+        r0,_        = start_pos(self.sim, args.start)
+        di,_        = self.sim.grav.get_body(args.dest)
+        dest0       = self.sim.grav.traj[di,0,:2]
+        self.D      = np.linalg.norm(dest0 - r0)
+        self.thresh = 1.2 * self.D
+
+        # sample destination orbit + angular weights
+        self.orbit       = self.sim.grav.traj[di,:,:2]
+        M              = self.orbit.shape[0]
         angles         = np.linspace(0,2*math.pi,M,endpoint=False)
-        theta_dest     = angles[di]
-        delta          = np.abs((angles - theta_dest + math.pi)
+        θ_dest         = angles[di]
+        Δ              = np.abs((angles - θ_dest + math.pi)
                                 % (2*math.pi) - math.pi)
-        self.orbit_weights = 1.0 - delta/math.pi           # in [0,1]
+        self.orbit_weights = 1.0 - Δ/math.pi
 
-        # bonus sites
+        # patches: always include dest index + extra_food random indices
+        idxs = {di}
         if args.extra_food>0:
-            idxs = np.random.choice(M, args.extra_food, replace=False)
-            self.bonus_pts = self.orbit[idxs]
-        else:
-            self.bonus_pts = np.empty((0,2))
+            idxs |= set(random.sample(range(M), args.extra_food))
+        self.bonus_idxs = np.array(sorted(idxs),dtype=int)
+        self.bonus_pts  = self.orbit[self.bonus_idxs]
+        self.bonus_vals = self.orbit_weights[self.bonus_idxs]
 
-        # initialize bees
-        r0, _ = start_pos(self.sim, args.start)
-        self.scouts   = []
-        self.employed = []
-        self.onlookers= []
+        # init bees
+        self.scouts    = []
+        self.employed  = []
+        self.onlookers = []
         for i in range(self.N):
             ang = random.uniform(0,2*math.pi)
             b   = Bee(r0, ang, self.speed_AUd)
-            if   i < self.ne:      b.role="employed"; self.employed.append(b)
-            elif i < self.ne+self.no: b.role="onlooker";self.onlookers.append(b)
-            else:                   b.role="scout";   self.scouts.append(b)
+            if   i < self.ne:        b.role="employed";  self.employed.append(b)
+            elif i < self.ne+self.no: b.role="onlooker"; self.onlookers.append(b)
+            else:                    b.role="scout";     self.scouts.append(b)
+        self.bees   = self.employed + self.onlookers + self.scouts
+        self.history   = []
+        self.best_path = None
 
-        self.bees       = self.employed + self.onlookers + self.scouts
-        self.history    = []    # best fitness each step
-        self.best_path  = None
-
-    # ------------------------------------------------------------------------
-    def step_bee(self, bee):
-        prev = bee.r.copy()
-        bee.r += bee.v * self.sim.dt
+    def step_bee(self, b: Bee):
+        prev = b.r.copy()
+        b.r  += b.v * self.sim.dt
         if self.args.use_gravity:
-            bee.v += self.sim.grav.gravity_accel(bee.r) * self.sim.dt
+            b.v += self.sim.grav.gravity_accel(b.r) * self.sim.dt
 
-        bee.path_length += np.linalg.norm(bee.r - prev)
+        # update path length
+        b.path_length += np.linalg.norm(b.r - prev)
 
-        # nearest orbit sample
-        dists = np.linalg.norm(self.orbit - bee.r, axis=1)
-        i_near = np.argmin(dists)
+        # angular‐proximity weight
+        dists   = np.linalg.norm(self.orbit - b.r, axis=1)
+        i_near  = np.argmin(dists)
         w_orbit = self.orbit_weights[i_near]
-        w_path  = 1.0/(1.0 + bee.path_length)
 
-        bee.fit = w_orbit * w_path
+        # path‐length bonus
+        L         = b.path_length
+        diff      = self.thresh - L
+        frac      = diff/self.thresh
+        path_bonus= (1.0+frac) if diff>=0 else frac
 
-        # bonus
-        if self.bonus_pts.size:
-            d2 = np.linalg.norm(self.bonus_pts - bee.r, axis=1).min()
-            if d2 < 0.02:
-                bee.fit += 0.5
+        b.fit = w_orbit * path_bonus
 
-        bee.path.append(bee.r.copy())
+        # food‐patch bonus
+        d2  = np.linalg.norm(self.bonus_pts - b.r, axis=1)
+        hit = np.where(d2<0.02)[0]
+        if hit.size:
+            b.fit += float(self.bonus_vals[hit[0]])
 
-    # ------------------------------------------------------------------------
+        b.path.append(b.r.copy())
+
     def run(self):
         steps     = int(self.args.years * 365.0 / self.args.dt)
-        best_path = []
+        best_traj = []
 
         for _ in range(steps):
-            # 1) Employed phase: local neighborhood search
+            # employed
             for b in self.employed:
-                # small random perturbation of direction
-                ang = math.atan2(b.v[1], b.v[0]) \
-                    + random.uniform(-0.1,0.1)
-                b.v = self.speed_AUd * np.array([math.cos(ang),
-                                                 math.sin(ang)])
+                θ   = math.atan2(b.v[1],b.v[0]) + random.uniform(-0.1,0.1)
+                b.v = self.speed_AUd * np.array([math.cos(θ),
+                                                 math.sin(θ)])
                 self.step_bee(b)
+                b.trial = 0 if random.random()<b.fit else b.trial+1
 
-                # abandonment tracking
-                if random.random() < b.fit:
-                    b.trial = 0
-                else:
-                    b.trial += 1
-
-            # 2) Onlooker phase: choose employed bee to follow
-            fits = np.array([b.fit for b in self.employed])
-            total = fits.sum() or 1.0
-            probs = fits/total
-
+            # onlookers
+            fits  = np.array([b.fit for b in self.employed])
+            pr    = fits/(fits.sum() or 1.0)
             for b in self.onlookers:
-                # pick one employed solution
-                j = random.choices(self.employed, weights=probs)[0]
-                # copy its velocity exactly
+                j   = random.choices(self.employed, weights=pr, k=1)[0]
                 b.v = j.v.copy()
                 self.step_bee(b)
+                b.trial = 0 if random.random()<b.fit else b.trial+1
 
-                # abandonment
-                if random.random() < b.fit:
-                    b.trial = 0
-                else:
-                    b.trial += 1
-
-            # 3) Scout phase: re-initialize bad solutions
+            # scouts
             for b in self.scouts:
-                if b.trial > 15:
-                    ang = random.uniform(0,2*math.pi)
-                    b.v   = self.speed_AUd * np.array([math.cos(ang),
-                                                       math.sin(ang)])
+                if b.trial>15:
+                    θ   = random.uniform(0,2*math.pi)
+                    b.v = self.speed_AUd * np.array([math.cos(θ),
+                                                     math.sin(θ)])
                     b.trial = 0
                 self.step_bee(b)
 
-            # record best
             best = max(self.bees, key=lambda b: b.fit)
-            best_path.append(best.r.copy())
+            best_traj.append(best.r.copy())
             self.history.append(best.fit)
 
-            # optional planet step
             if self.args.move_planets:
                 self.sim.grav.step()
 
-        self.best_path = np.vstack(best_path)
+        self.best_path = np.vstack(best_traj)
         return self.best_path
 
 # ----------------------------------------------------------------------------
 def main():
     args      = get_args()
     colony    = BeeColony(args)
-    best_traj = colony.run()
+    full_path = colony.run()
+
+    # --- TRUNCATE at first arrival to dest planet  ---
+    di,_    = colony.sim.grav.get_body(args.dest)
+    dest_pt = colony.sim.grav.traj[di,0,:2]
+    # distance to dest each step:
+    d2      = np.linalg.norm(full_path - dest_pt, axis=1)
+    hits    = np.where(d2 < 0.02)[0]
+    if len(hits):
+        trunc = hits[0]+1
+        colony.best_path = full_path[:trunc]
+    else:
+        colony.best_path = full_path
 
     run_id = f"{args.start}_{args.dest}_ABC_{args.n_bees}b"
     out_sub= os.path.join(OUT_DIR, run_id)
@@ -245,7 +237,7 @@ def main():
               fname="best_path.png",
               out_dir=out_sub)
 
-    print("BCO (ABC) outputs in", out_sub)
+    print("BCO (ABC) outputs saved to", out_sub)
 
 if __name__ == "__main__":
     main()
