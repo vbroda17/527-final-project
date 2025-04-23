@@ -49,7 +49,11 @@ def snapshot(sim, rocket, fname="snapshot.png"):
 
 # ---------------- animate ---------------------------------------------
 def animate(sim, rocket, fname="flight.gif"):
-    fname = os.path.join(OUT_DIR, fname)
+    if os.path.dirname(fname):
+        out = fname
+    else:
+        out = os.path.join(OUT_DIR, fname)
+    fname = out
     path   = np.vstack(rocket.path)
     speeds = np.linalg.norm(np.diff(path, axis=0), axis=1) / sim.dt
     norm   = plt.Normalize(speeds.min(), speeds.max())

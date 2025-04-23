@@ -29,3 +29,7 @@ Random food as like astroids appear on and near orbit as well, more static value
 Try without graviity on all bees, then consider trying with later
 
 # add calculations being saved to like npy files
+
+# To do 
+Fix the vizulizatrion and stuff
+fix the obj func to include distasnce
