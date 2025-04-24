@@ -98,3 +98,9 @@ Path‐length bonus penalizes overly long, winding routes.
 Patch bonuses give extra spikes of fitness at random orbit spots (so the colony can explore “shortcuts”).
 
 Role dynamics (employed ↔ onlooker ↔ scout) implement the standard ABC flow—employed probe good spots, onlookers converge on the best of those, scouts randomly re-seed.
+
+
+# TO DO TOMMOROW
+Fix the best path. Make it stop earlier
+change the param search to do it all with no command line arguments
+check how the graphs look

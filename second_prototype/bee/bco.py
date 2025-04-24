@@ -1,43 +1,44 @@
 #!/usr/bin/env python3
 # bee/bco.py
 """
-Artificial‐Bee‐Colony optimisation for inter‐planet transfers, **with global-best
-history tracking**.
+Artificial-Bee-Colony optimisation for inter-planet transfers
+–––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
+• Tracks the global-best fitness (value, step, path-length, path).
+• Gives a strong bonus for flying very close to the destination.
+• Allows a looser path-length budget.
 
-New in this version
--------------------
-* While the simulation is running we continuously watch every bee and remember
-  the *single best fitness value ever seen*, **which step it occurred at**, and
-  the **path (and its length) from launch up to that step**.
-* These values are written to *summary.csv* and are also used for the final
-  best-path plot, so the graphic now shows the *true* best sub-path rather than
-  the winner’s final trajectory end-to-end.
-* `epoch_fitness.csv` gains two extra columns – the step index of the epoch’s
-  max fitness and the path length at that step.
-
-The command-line interface and all previous outputs remain unchanged; new
-columns are simply appended to the existing CSVs so no downstream tooling
-breaks.
+Adjustable constants (feel free to tune):
+    PATH_THRESH_FACTOR    – path-length tolerance multiplier
+    CLOSE_BONUS_RADIUS_AU – distance (AU) considered “very close”
+    CLOSE_BONUS_SCALE     – additive reward when inside that radius
 """
+
+# ─────────────────────────────────────────────────────────────
+# Tunables for the new behaviour  ←—  tweak these three numbers
+# ─────────────────────────────────────────────────────────────
+PATH_THRESH_FACTOR    = 1.20   # 1) path-length tolerance (× straight-line)
+CLOSE_BONUS_RADIUS_AU = 0.05   # 2) “very close” radius around destination
+CLOSE_BONUS_SCALE     = 5.0    # 3) bonus added when inside that radius
+# ─────────────────────────────────────────────────────────────
 
 import os
 import argparse
 import random
 import math
 import csv
-from copy import deepcopy
 
 import numpy as np
 
 from rocket.sim import RocketSim
 from bee.viz   import save_fitness, animate_colony, plot_best
 
+EMPLOYED_FRAC = 0.5
 OUT_DIR = "bco_output"
 os.makedirs(OUT_DIR, exist_ok=True)
 
-EMPLOYED_FRAC = 0.5
-
-
+# ---------------------------------------------------------------------
+# CLI setup
+# ---------------------------------------------------------------------
 def get_args():
     p = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
@@ -64,76 +65,77 @@ def get_args():
                    help="number of independent ABC runs")
     return p.parse_args()
 
-
+# ---------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------
 def start_pos(sim, start):
-    if isinstance(start, str):
-        idx,_ = sim.grav.get_body(start)
-        r0    = sim.grav.traj[idx,0].copy()
-        v0    = (sim.grav.traj[idx,1] - sim.grav.traj[idx,0]) / sim.dt
+    """Return initial position/velocity given a body name or x,y string."""
+    if isinstance(start, str) and ',' not in start:
+        idx, _ = sim.grav.get_body(start)
+        r0     = sim.grav.traj[idx, 0].copy()
+        v0     = (sim.grav.traj[idx, 1] - sim.grav.traj[idx, 0]) / sim.dt
     else:
-        coords = np.fromstring(start, sep=",")
+        coords = np.fromstring(start, sep=',')
         r0     = coords.copy()
         v0     = np.zeros(2)
     return r0, v0
 
-
+# ---------------------------------------------------------------------
+# Bee container
+# ---------------------------------------------------------------------
 class Bee:
     def __init__(self, pos, angle, speed_AUd):
         self.r           = pos.copy()
         self.v           = speed_AUd * np.array([math.cos(angle),
-                                                  math.sin(angle)])
+                                                 math.sin(angle)])
         self.fit         = 0.0
         self.trial       = 0
         self.path        = [self.r.copy()]
         self.path_length = 0.0
         self.role        = None
-        # once True, this bee stops moving/appending to its path
-        self.finished    = False
+        self.finished    = False   # stop updating once arrived
 
-
+# ---------------------------------------------------------------------
+# Bee Colony (single epoch)
+# ---------------------------------------------------------------------
 class BeeColony:
     def __init__(self, args):
         self.args = args
 
-        # numbers of scout/employed/onlooker
+        # Split colony into roles
         self.N   = args.n_bees
         self.ns  = int(args.scout_frac * self.N)
         self.nr  = self.N - self.ns
         self.ne  = int(EMPLOYED_FRAC * self.nr)
         self.no  = self.nr - self.ne
 
-        # convert km/h → AU/day
+        # Velocity scaling (km/h → AU/day)
         self.speed_AUd = args.speed * 1e3 * 24.0 / 1.495978707e11
 
-        # build a fresh planetary sim
-        self.sim       = RocketSim(years=args.years,
-                                   dt=args.dt,
-                                   elliptical=True)
+        # Planetary simulation
+        self.sim = RocketSim(years=args.years, dt=args.dt, elliptical=True)
         if not args.use_gravity:
             self.sim.grav.gravity_accel = lambda r: np.zeros(2)
 
-        # starting & destination positions
-        r0,_           = start_pos(self.sim, args.start)
-        di,_           = self.sim.grav.get_body(args.dest)
-        dest0          = self.sim.grav.traj[di,0,:2]
-        self.dest_pos  = dest0
-        # when within this AU, we consider "arrived"
+        # Start & destination
+        r0, _          = start_pos(self.sim, args.start)
+        di, _          = self.sim.grav.get_body(args.dest)
+        self.dest_pos  = self.sim.grav.traj[di, 0, :2]
         self.stop_dist = 0.02
 
-        # straight‐line distance & a loose threshold (for fitness bonus)
-        self.D         = np.linalg.norm(dest0 - r0)
-        self.thresh    = 1.05 * self.D
+        # Path-length tolerance based on straight-line distance
+        self.D      = np.linalg.norm(self.dest_pos - r0)
+        self.thresh = PATH_THRESH_FACTOR * self.D
 
-        # sample the full destination orbit & compute angular weights
-        self.orbit       = self.sim.grav.traj[di,:,:2]
-        M               = self.orbit.shape[0]
-        angles          = np.linspace(0,2*math.pi,M,endpoint=False)
-        θ_dest          = angles[di]
-        Δ               = np.abs((angles - θ_dest + math.pi)
-                                 % (2*math.pi) - math.pi)
-        self.orbit_weights = 1.0 - Δ/math.pi
+        # Destination orbit (for angular weighting)
+        self.orbit          = self.sim.grav.traj[di, :, :2]
+        M                   = self.orbit.shape[0]
+        angles              = np.linspace(0, 2*math.pi, M, endpoint=False)
+        θ_dest              = angles[di]
+        Δ                   = np.abs((angles - θ_dest + math.pi) % (2*math.pi) - math.pi)
+        self.orbit_weights  = 1.0 - Δ / math.pi
 
-        # pick the fixed‐food‐patch indices: always include true planet idx
+        # Food patches (always include real planet)
         idxs = {di}
         if args.extra_food > 0:
             idxs |= set(random.sample(range(M), args.extra_food))
@@ -141,191 +143,175 @@ class BeeColony:
         self.bonus_pts  = self.orbit[self.bonus_idxs]
         self.bonus_vals = self.orbit_weights[self.bonus_idxs]
 
-        # initialize bees in the three roles
-        self.scouts    = []
-        self.employed  = []
-        self.onlookers = []
+        # Create bees
+        self.scouts, self.employed, self.onlookers = [], [], []
         for i in range(self.N):
-            ang = random.uniform(0,2*math.pi)
-            b   = Bee(r0, ang, self.speed_AUd)
-            if   i < self.ne:
-                b.role="employed";  self.employed.append(b)
-            elif i < self.ne+self.no:
-                b.role="onlooker"; self.onlookers.append(b)
-            else:
-                b.role="scout";     self.scouts.append(b)
-        self.bees    = self.employed + self.onlookers + self.scouts
+            ang = random.uniform(0, 2*math.pi)
+            bee = Bee(r0, ang, self.speed_AUd)
+            if   i < self.ne:            bee.role = "employed";  self.employed.append(bee)
+            elif i < self.ne + self.no:  bee.role = "onlooker"; self.onlookers.append(bee)
+            else:                        bee.role = "scout";     self.scouts.append(bee)
+        self.bees = self.employed + self.onlookers + self.scouts
 
-        # history & global-best trackers
-        self.history          = []  # time-series of colony best fitness
+        # Global-best trackers
+        self.history          = []
         self.global_best_fit  = -1e9
         self.global_best_step = -1
-        self.global_best_path = None  # numpy array (N×2)
         self.global_best_len  = 0.0
+        self.global_best_path = None
 
-    # ---------------------------------------------------------------------
-    # single-bee integrator and fitness update
-    # ---------------------------------------------------------------------
+    # ----------------------------------------------------------
+    # Physics + fitness for a single bee
+    # ----------------------------------------------------------
     def step_bee(self, b):
         if b.finished:
             return
 
         prev = b.r.copy()
-        b.r  += b.v * self.sim.dt
+        b.r += b.v * self.sim.dt
         if self.args.use_gravity:
             b.v += self.sim.grav.gravity_accel(b.r) * self.sim.dt
 
-        # arrival check
+        # Check arrival
         if np.linalg.norm(b.r - self.dest_pos) < self.stop_dist:
             b.finished = True
             b.path.append(b.r.copy())
             return
 
-        # update path length
+        # Grow path length
         b.path_length += np.linalg.norm(b.r - prev)
 
-        # fitness components ------------------------------------------------
+        # ---------- FITNESS ----------
+        # (1) angular/orbit proximity
         dists   = np.linalg.norm(self.orbit - b.r, axis=1)
-        i_near  = np.argmin(dists)
-        w_orbit = self.orbit_weights[i_near]
+        i_near  = int(np.argmin(dists))
+        w_orbit = (self.orbit_weights[i_near]) ** 2  # square to emphasise
 
-        L          = b.path_length
-        diff       = self.thresh - L
+        # (2) path-length bonus/penalty
+        diff       = self.thresh - b.path_length
         frac       = diff / self.thresh
         path_bonus = (1.0 + frac) if diff >= 0 else frac
-        b.fit      = w_orbit * path_bonus
 
-        # patch bonus
+        b.fit = 2.0 * w_orbit * path_bonus  # ×2 for a bit more influence
+
+        # (3) Food-patch bonus
         d2  = np.linalg.norm(self.bonus_pts - b.r, axis=1)
         hit = np.where(d2 < 0.02)[0]
         if hit.size:
             b.fit += float(self.bonus_vals[hit[0]])
 
-        # record new position
+        # (4) CLOSE-PROXIMITY bonus  ←— the new part you’ll likely tweak most
+        d_dest = np.linalg.norm(b.r - self.dest_pos)
+        if d_dest < CLOSE_BONUS_RADIUS_AU:
+            # linear ramp: max bonus at 0, zero at radius limit
+            b.fit += CLOSE_BONUS_SCALE * (1.0 - d_dest / CLOSE_BONUS_RADIUS_AU)
+
         b.path.append(b.r.copy())
 
-    # ------------------------------------------------------------------
-    # full colony evolution for the configured years
-    # ------------------------------------------------------------------
+    # ----------------------------------------------------------
+    # Main colony loop
+    # ----------------------------------------------------------
     def run(self):
         steps = int(self.args.years * 365.0 / self.args.dt)
         for step in range(steps):
-            # employed bees ------------------------------------------------
+            # Employed bees
             for b in self.employed:
                 θ0      = math.atan2(b.v[1], b.v[0])
-                dest_xy = self.bonus_pts[0]   # true planet
-                θ1      = math.atan2(dest_xy[1]-b.r[1],
-                                     dest_xy[0]-b.r[0])
-                θ       = 0.8*θ0 + 0.2*θ1 + random.uniform(-0.02,0.02)
-                b.v     = self.speed_AUd * np.array([math.cos(θ),
-                                                     math.sin(θ)])
+                dest_xy = self.bonus_pts[0]
+                θ1      = math.atan2(dest_xy[1] - b.r[1],
+                                     dest_xy[0] - b.r[0])
+                θ       = 0.8*θ0 + 0.2*θ1 + random.uniform(-0.02, 0.02)
+                b.v     = self.speed_AUd * np.array([math.cos(θ), math.sin(θ)])
                 self.step_bee(b)
                 b.trial = 0 if random.random() < b.fit else b.trial + 1
 
-            # onlookers ----------------------------------------------------
-            fits = np.array([b.fit for b in self.employed])
+            # Onlookers
+            fits = np.fromiter((e.fit for e in self.employed), float)
             pr   = fits / (fits.sum() or 1.0)
             for b in self.onlookers:
-                j   = random.choices(self.employed, weights=pr, k=1)[0]
-                b.v = j.v.copy()
+                leader = random.choices(self.employed, weights=pr, k=1)[0]
+                b.v    = leader.v.copy()
                 self.step_bee(b)
                 b.trial = 0 if random.random() < b.fit else b.trial + 1
 
-            # scouts -------------------------------------------------------
+            # Scouts
             for b in self.scouts:
                 if b.trial > 15:
                     θ   = random.uniform(0, 2*math.pi)
-                    b.v = self.speed_AUd * np.array([math.cos(θ),
-                                                     math.sin(θ)])
+                    b.v = self.speed_AUd * np.array([math.cos(θ), math.sin(θ)])
                     b.trial = 0
                 self.step_bee(b)
 
-            # book-keeping --------------------------------------------------
-            colony_best = max(self.bees, key=lambda b: b.fit)
+            # Book-keeping
+            colony_best = max(self.bees, key=lambda x: x.fit)
             self.history.append(colony_best.fit)
 
-            # global-best update
             if colony_best.fit > self.global_best_fit:
                 self.global_best_fit  = colony_best.fit
                 self.global_best_step = step
                 self.global_best_len  = colony_best.path_length
-                # deep copy to freeze the path as it exists *now*
                 self.global_best_path = np.vstack(colony_best.path).copy()
 
             if self.args.move_planets:
                 self.sim.grav.step()
 
-        # nothing to return – caller just reads the attributes
-        return
-
-
-# =============================================================================
-# top-level driver – handles multiple epochs and all I/O
-# =============================================================================
-
+# ---------------------------------------------------------------------
+# Driver (multi-epoch)
+# ---------------------------------------------------------------------
 def main():
     args = get_args()
 
     epoch_rows = []
-    overall_best_fit  = -1e9
-    overall_best_col  = None
+    best_colony = None
+    overall_best = -1e9
 
     for ep in range(1, args.epochs + 1):
-        colony = BeeColony(args)
-        colony.run()
-
-        # epoch-level summary row
+        col = BeeColony(args)
+        col.run()
         epoch_rows.append((ep,
-                           colony.global_best_fit,
-                           colony.global_best_step,
-                           colony.global_best_len))
+                           col.global_best_fit,
+                           col.global_best_step,
+                           col.global_best_len))
+        if col.global_best_fit > overall_best:
+            overall_best = col.global_best_fit
+            best_colony  = col
 
-        # cross-epoch comparison
-        if colony.global_best_fit > overall_best_fit:
-            overall_best_fit = colony.global_best_fit
-            overall_best_col = colony
-
-    # ---------------------------------------------------------------------
-    # output directory bookkeeping
-    # ---------------------------------------------------------------------
+    # Output dir
     run_id  = f"{args.start}_{args.dest}_ABC_{args.n_bees}b"
     out_dir = os.path.join(OUT_DIR, run_id)
     os.makedirs(out_dir, exist_ok=True)
 
-    # epoch_fitness.csv ----------------------------------------------------
+    # epoch_fitness.csv
     with open(os.path.join(out_dir, "epoch_fitness.csv"), "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["epoch", "best_fit", "best_step", "path_len"])
         w.writerows(epoch_rows)
 
-    # summary.csv ----------------------------------------------------------
+    # summary.csv
     with open(os.path.join(out_dir, "summary.csv"), "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["start", "dest", "n_bees", "epochs",
                     "best_fit", "best_step", "path_len"])
-        w.writerow([args.start, args.dest, args.n_bees,
-                    args.epochs,
-                    overall_best_fit,
-                    overall_best_col.global_best_step,
-                    overall_best_col.global_best_len])
+        w.writerow([args.start, args.dest, args.n_bees, args.epochs,
+                    best_colony.global_best_fit,
+                    best_colony.global_best_step,
+                    best_colony.global_best_len])
 
-    # time-series of colony best fitness (from the winning epoch)
-    save_fitness(overall_best_col, os.path.join(out_dir, "fitness.csv"))
+    # Time-series
+    save_fitness(best_colony, os.path.join(out_dir, "fitness.csv"))
 
-    # animation ------------------------------------------------------------
-    animate_colony(overall_best_col,
+    # Visualisations
+    animate_colony(best_colony,
                    fname="colony_best.gif",
                    out_dir=out_dir,
                    show_orbits=args.show_orbits)
 
-    # static best-path plot -----------------------------------------------
-    overall_best_col.best_path = overall_best_col.global_best_path
-    plot_best(overall_best_col,
+    best_colony.best_path = best_colony.global_best_path
+    plot_best(best_colony,
               fname="best_path.png",
               out_dir=out_dir)
 
     print("DONE →", out_dir)
-
 
 if __name__ == "__main__":
     main()
