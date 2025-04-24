@@ -28,8 +28,73 @@ fintess have entire orbit as food source, calculate actuall fintess based on rea
 Random food as like astroids appear on and near orbit as well, more static value
 Try without graviity on all bees, then consider trying with later
 
-# add calculations being saved to like npy files
+# Consider add calculations being saved to like npy files
+Need to fix best path. It is being found in there but not displaying on best path properly.
 
-# To do 
-Fix the vizulizatrion and stuff
-fix the obj func to include distasnce
+# General info about bee
+## Class
+Speed conversion from km/h → AU/day.
+
+Planet sim: spin up a RocketSim to get the planets’ precomputed trajectories.
+
+Distance threshold
+
+Compute the straight‐line distance D from start to target.
+
+Set a path‐length threshold at 1.05*D. Any path longer than that is penalized.
+
+Orbit weights
+
+Sample M points around the destination planet’s orbit.
+
+Compute each point’s angular difference Δ from the true‐planet position, then so that the point exactly at the planet has weight 1, and the opposite side of the circle has weight 0.
+
+Bonus patches
+
+Always include the true‐planet index.
+
+Randomly pick up to extra_food additional orbit indices.
+
+Those points each get the same angular weight as above (so the planet spot is the highest).
+
+Initialize the bees into three buckets:
+
+Employed (search around good spots),
+
+Onlookers (follow employed proportionally to their fitness),
+
+Scouts (random wanderers that “abandon” a bad patch and relocate).
+## Step bee function
+Each time a bee steps:
+
+Move by its current velocity, optionally add gravity.
+
+Accumulate the incremental path length.
+
+Angular proximity:
+Find the orbit point whose distance to the bee is minimal → index i_near.
+Look up its w_orbit = orbit_weights[i_near].
+
+Path-length bonus:
+Let L be its cumulative path length so far, and thresh = 1.05·D.
+Define frac = (thresh − L)/thresh.
+If L ≤ thresh, bonus = 1 + frac (so at exactly L=0, bonus=2; at L=thresh, bonus=1).
+If L>thresh, then bonus = frac<0, penalizing overly long routes.
+
+Combine
+b.fit = w_orbit * path_bonus
+
+Patch bonus
+If within 0.02 AU of any bonus point → add that point’s angular weight to b.fit.
+
+Record the new position into b.path.
+
+## TLDR
+Putting it all together
+Angular proximity drives bees toward the portion of the orbit closest to the actual planet.
+
+Path‐length bonus penalizes overly long, winding routes.
+
+Patch bonuses give extra spikes of fitness at random orbit spots (so the colony can explore “shortcuts”).
+
+Role dynamics (employed ↔ onlooker ↔ scout) implement the standard ABC flow—employed probe good spots, onlookers converge on the best of those, scouts randomly re-seed.

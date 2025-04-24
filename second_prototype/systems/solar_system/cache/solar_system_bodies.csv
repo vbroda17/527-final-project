@@ -1,0 +1,5 @@
+name,radius,mass,aphelion,perihelion,mean_anomaly
+Mercury, 1.63e-5, 0.055, 0.4667, 0.3075, 0
+Venus,   4.05e-5, 0.815, 0.720 , 0.726 , 90
+Earth,   4.26e-5, 1.0,   1.0167, 0.9833, 100  
+Mars,    2.27e-5, 0.107, 1.6660, 1.3814, 150  

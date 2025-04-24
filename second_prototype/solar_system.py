@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-solar_system.py  –  static overview *and* animated orbits.
+solar_system.py  –  static overview *and* animated orbits, with trajectory caching.
 
 CLI
 ----
@@ -8,27 +8,24 @@ python solar_system.py [--ellipse | --circular] [--years N] [--dt DAYS]
                        [--system PATH] [--static]
 
     --ellipse / --circular   choose orbit model   (default elliptical)
-    --years    N             simulate this many Earth years (default 5)
-    --dt       DAYS          time step in days    (default 1)
-    --static                 skip the animation, only build static PNG
-    --system   PATH          data folder (default systems/solar_system)
+    --years    N             simulate this many Earth years (default 5)
+    --dt       DAYS           time step in days    (default 1)
+    --system   PATH           data folder (default systems/solar_system)
+    --static                  skip the animation, only build static PNG
 
-Requires: numpy, matplotlib, tqdm  (concurrent.futures is in std‑lib)
+Requires: numpy, matplotlib, tqdm, concurrent.futures (std‑lib)
 """
 
 from __future__ import annotations
-import argparse, csv, math, os, sys
+import argparse, csv, math, os, sys, shutil
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from tqdm.auto import tqdm
-from concurrent.futures import ProcessPoolExecutor, as_completed   # parallel
-
-import numpy as np, math
-from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # ──────────────────────────────────────────────────────────────────────────────
 #   Unit conversion helpers
@@ -37,22 +34,34 @@ AU_KM          = 1.495_978_707e8          # km
 EARTH_MASS_KG  = 5.9722e24
 SOLAR_MASS_EM  = 332_946.0
 DEG2RAD        = math.pi / 180.0
+DAY_S          = 86400.0                  # seconds in day
 
-# --- canonical factors -------------------------------------------------
-AU_KM  = 1.495978707e8               # km in one AU
-DAY_S  = 86400.0                     # s in one day
-
-# --- handy converters --------------------------------------------------
-km_to_AU      = 1.0 / AU_KM
-AU_to_km      = AU_KM
-kms_to_AUday  = DAY_S / AU_KM        # convert km/s  →  AU/day
-AUday_to_kms  = AU_KM / DAY_S        # convert AU/day → km/s
+km_to_AU       = 1.0 / AU_KM
+AU_to_km       = AU_KM
+kms_to_AUday   = DAY_S / AU_KM
+AUday_to_kms   = AU_KM / DAY_S
 mps2_to_AUday2 = (DAY_S**2) / (AU_KM*1e3)
+
+# ──────────────────────────────────────────────────────────────────────────────
+#   File IO helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def read_simple_kv(path: Path) -> Dict[str,str]:
+    d = {}
+    with path.open() as f:
+        for ln in f:
+            ln = ln.split("#")[0].strip()
+            if "=" in ln:
+                k,v = [x.strip() for x in ln.split("=",1)]
+                d[k.lower()] = v
+    return d
+
+# Conversion functions
 
 def dist_to_au(val: float, unit: str) -> float:
     u = unit.lower()
     if u.startswith("au"):  return val
-    if u in ("km", "kilometre", "kilometer"): return val / AU_KM
+    if u in ("km","kilometre","kilometer"): return val / AU_KM
     if u == "m": return val / (AU_KM * 1e3)
     raise ValueError(f"unknown distance unit '{unit}'")
 
@@ -70,31 +79,23 @@ def angle_to_rad(val: float, unit: str) -> float:
     raise ValueError(f"unknown angle unit '{unit}'")
 
 # ──────────────────────────────────────────────────────────────────────────────
-#   File IO
+#   Load axis data
 # ──────────────────────────────────────────────────────────────────────────────
-def read_simple_kv(path: Path) -> Dict[str,str]:
-    d={}
-    with path.open() as f:
-        for ln in f:
-            ln=ln.split("#")[0].strip()
-            if "=" in ln:
-                k,v=[x.strip() for x in ln.split("=",1)]
-                d[k.lower()]=v
-    return d
 
 def load_sun(folder: Path, meta: Dict[str,str]):
-    d=read_simple_kv(folder/"sun.txt")
+    d = read_simple_kv(folder / "sun.txt")
     mass_u   = d.get("mass_unit",   meta.get("mass_unit","EarthMass"))
     radius_u = d.get("radius_unit", meta.get("distance_unit","AU"))
     return {
-        "mass":   mass_to_earth(float(d["mass"]),   mass_u),
+        "mass":   mass_to_earth(float(d["mass"]), mass_u),
         "radius": dist_to_au   (float(d["radius"]), radius_u),
     }
 
+
 def load_bodies(folder: Path, meta: Dict[str,str]) -> List[Dict]:
-    bodies=[]
-    with (folder/"bodies.csv").open(newline="") as f:
-        rdr=csv.DictReader(f)
+    bodies = []
+    with (folder / "bodies.csv").open(newline="") as f:
+        rdr = csv.DictReader(f)
         for r in rdr:
             radius_u = meta.get("radius_unit",   meta.get("distance_unit","AU"))
             mass_u   = meta.get("mass_unit","EarthMass")
@@ -112,69 +113,137 @@ def load_bodies(folder: Path, meta: Dict[str,str]) -> List[Dict]:
     return bodies
 
 # ──────────────────────────────────────────────────────────────────────────────
-#   Orbit maths
+#   Orbit maths & parallel precompute
 # ──────────────────────────────────────────────────────────────────────────────
-G_AU3_EM_day2 = 6.67430e-11 * (86400**2) / (AU_KM*1000)**3 * EARTH_MASS_KG  # AU^3 / (EM * day^2)
+G_AU3_EM_day2 = 6.67430e-11 * DAY_S**2 / (AU_KM*1000)**3 * EARTH_MASS_KG
 
-def elements(body:Dict):
-    a = 0.5*(body["aphelion"]+body["perihelion"])
-    e = (body["aphelion"]-body["perihelion"])/(body["aphelion"]+body["perihelion"])
-    return a,e
+def elements(body: Dict):
+    a = 0.5*(body["aphelion"] + body["perihelion"])
+    e = (body["aphelion"] - body["perihelion"]) / (body["aphelion"] + body["perihelion"])
+    return a, e
 
 def mean_motion(a, M_central):
-    return 2*math.pi/period(a,M_central)
+    return 2*math.pi / period(a, M_central)
 
 def period(a, M_central):
-    return 2*math.pi*math.sqrt(a**3/(G_AU3_EM_day2*M_central))
+    return 2*math.pi * math.sqrt(a**3 / (G_AU3_EM_day2 * M_central))
 
 def kepler_E(M,e, tol=1e-10):
-    E=M if e<0.8 else math.pi
+    E = M if e<0.8 else math.pi
     for _ in range(100):
-        d=(E-e*math.sin(E)-M)/(1-e*math.cos(E))
-        E-=d
-        if abs(d)<tol:break
+        d = (E - e*math.sin(E) - M) / (1 - e*math.cos(E))
+        E -= d
+        if abs(d) < tol: break
     return E
 
 def true_from_E(E,e):
-    return 2*math.atan2(math.sqrt(1+e)*math.sin(E/2),
-                        math.sqrt(1-e)*math.cos(E/2))
+    return 2*math.atan2(math.sqrt(1+e)*math.sin(E/2), math.sqrt(1-e)*math.cos(E/2))
 
 def position_at_time(body, t, M_central):
-    a,e=elements(body)
-    n = mean_motion(a, M_central)
-    M = body["M0"] + n*t
-    E = kepler_E(M% (2*math.pi), e)
+    a,e = elements(body)
+    n   = mean_motion(a,M_central)
+    M   = body["M0"] + n*t
+    E   = kepler_E(M%(2*math.pi), e)
     theta = true_from_E(E,e)
     r = a*(1-e**2)/(1+e*math.cos(theta))
     return np.array([r*math.cos(theta), r*math.sin(theta)])
 
-def position_circle(body,t,M_central):
-    a,_=elements(body)
-    T=period(a,M_central)
-    theta=body["M0"]+2*math.pi*t/T
-    return np.array([a*math.cos(theta),a*math.sin(theta)])
+def position_circle(body, t, M_central):
+    a,_ = elements(body)
+    T = period(a, M_central)
+    theta = body["M0"] + 2*math.pi*t/T
+    return np.array([a*math.cos(theta), a*math.sin(theta)])
 
-# ──────────────────────────────────────────────────────────────────────────────
-#   Trajectory pre‑compute (parallel with progress bar)
-# ──────────────────────────────────────────────────────────────────────────────
-def compute_one(body, t_array, M_central, elliptical):
+def compute_one(body, t_arr, M_central, elliptical):
     if elliptical:
-        return np.stack([position_at_time(body,t,M_central) for t in t_array])
-    return np.stack([position_circle(body,t,M_central) for t in t_array])
+        return np.stack([position_at_time(body,t,M_central) for t in t_arr])
+    return np.stack([position_circle(body,t,M_central) for t in t_arr])
 
-def precompute(bodies,total_days,dt, M_central, elliptical):
-    t_arr=np.arange(0,total_days+dt,dt)
-    traj=np.zeros((len(bodies),len(t_arr),2))
+def precompute(bodies, total_days, dt, M_central, elliptical):
+    t_arr = np.arange(0, total_days+dt, dt)
+    traj = np.zeros((len(bodies), len(t_arr), 2))
     with ProcessPoolExecutor() as ex:
-        futures={ex.submit(compute_one,b,t_arr,M_central,elliptical):i
-                 for i,b in enumerate(bodies)}
-        for fut in tqdm(as_completed(futures),
-                        total=len(futures),
-                        desc="computing orbits",
-                        unit="planet"):
-            i=futures[fut]
-            traj[i]=fut.result()
-    return t_arr,traj
+        futures = {ex.submit(compute_one,b,t_arr,M_central,elliptical):i for i,b in enumerate(bodies)}
+        for fut in tqdm(as_completed(futures), total=len(futures), desc="computing orbits", unit="planet"):
+            traj[futures[fut]] = fut.result()
+    return t_arr, traj
+
+# ──────────────────────────────────────────────────────────────────────────────
+#   GravSim class wrapping precomputed trajectories
+# ──────────────────────────────────────────────────────────────────────────────
+class GravSim:
+    def __init__(self, bodies, traj, t_arr, star_mass):
+        self.bodies = bodies
+        self.traj = traj
+        self.t_arr = t_arr
+        self.star_mass = star_mass
+        self.i = 0
+        self.N_steps = traj.shape[1]
+        self.masses = np.array([star_mass] + [b['mass'] for b in bodies])
+        self.G = G_AU3_EM_day2
+    def get_positions(self):
+        return self.traj[:,self.i]
+    def get_body(self,name:str):
+        for j,b in enumerate(self.bodies):
+            if b['name'].lower()==name.lower(): return j,b
+        raise ValueError(f"'{name}' not found")
+    def gravity_accel(self,pos:np.ndarray):
+        a = np.zeros(2)
+        r0 = -pos
+        d3 = np.linalg.norm(r0)**3
+        a += self.G*self.star_mass * r0/d3
+        pl = self.get_positions()
+        rel = pl - pos
+        d3 = np.linalg.norm(rel,axis=1)**3
+        d3[d3==0] = np.inf
+        a += (self.G*self.masses[1:,None]*rel/d3[:,None]).sum(axis=0)
+        return a
+    def step(self,dt=None):
+        if dt is None: self.i = (self.i+1)%self.N_steps
+        else: self.i = (self.i + int(round(dt/(self.t_arr[1]-self.t_arr[0]))))%self.N_steps
+        return self.t_arr[self.i]
+    def current_time(self): return self.t_arr[self.i]
+
+# ──────────────────────────────────────────────────────────────────────────────
+#   build_sim with cache validation
+# ──────────────────────────────────────────────────────────────────────────────
+def build_sim(years:float=5.0, dt:float=1.0, system:str="systems/solar_system", elliptical:bool=True) -> GravSim:
+    folder = Path(system)
+    meta = read_simple_kv(folder/"metadata.txt")
+    meta.setdefault("distance_unit","AU")
+    meta.setdefault("mass_unit","EarthMass")
+    meta.setdefault("angle_unit","deg")
+    sun = load_sun(folder,meta)
+    bodies = load_bodies(folder,meta)
+
+    total_days = int(years*365)
+    cache_dir = folder/"cache"
+    cache_dir.mkdir(exist_ok=True)
+    sys_name = folder.name
+    flag = "ellip" if elliptical else "circ"
+    cache_npz = cache_dir/f"{sys_name}_traj_{years}y_{dt}d_{flag}.npz"
+    cache_csv = cache_dir/f"{sys_name}_bodies.csv"
+
+    # compare bodies.csv
+    source_csv = folder/"bodies.csv"
+    use_cache = False
+    if cache_npz.exists() and cache_csv.exists():
+        if source_csv.read_bytes() == cache_csv.read_bytes():
+            use_cache = True
+        else:
+            cache_npz.unlink()
+            cache_csv.unlink()
+    if use_cache:
+        data = np.load(cache_npz)
+        t_arr, traj = data['t_arr'], data['traj']
+        print(f"[solar_system] loaded cache: {cache_npz}")
+    else:
+        t_arr, traj = precompute(bodies, total_days, dt, sun['mass'], elliptical)
+        np.savez(cache_npz, t_arr=t_arr, traj=traj)
+        shutil.copy2(source_csv, cache_csv)
+        print(f"[solar_system] saved cache:   {cache_npz}")
+
+    return GravSim(bodies, traj, t_arr, sun['mass'])
 
 # ──────────────────────────────────────────────────────────────────────────────
 #   Plotting & animation
@@ -262,92 +331,6 @@ def animate(bodies, t_arr, traj, elliptical, save=False):
         print("GIF saved to orbit_anim.gif")
 
     plt.show()
-
-#
-# For Simuilation
-#
-
-# ───────────────────  NEW CLASS  ────────────────────────────
-class GravSim:
-    """
-    Light wrapper around the pre‑computed planet trajectories that provides:
-        • get_positions()  -> array (N_planets, 2)
-        • gravity_accel(pos) -> vec2    (Sun + every planet)
-        • step(dt)          -> advance internal index by one time‑step
-    """
-    def __init__(self, bodies, traj, t_arr, star_mass):
-        self.bodies   = bodies          # list of dicts
-        self.traj     = traj            # (N_pl, N_steps, 2)
-        self.t_arr    = t_arr
-        self.star_mass= star_mass
-        self.i        = 0               # current frame index
-        self.N_steps  = traj.shape[1]
-        self.masses   = np.array([star_mass] + [b["mass"] for b in bodies])
-        self.G        = G_AU3_EM_day2
-
-    # ----------------  query helpers  ----------------
-    def get_positions(self):
-        """Planet positions at current time index (N_planets, 2)."""
-        return self.traj[:, self.i]
-
-    def get_body(self, name:str):
-        for j,b in enumerate(self.bodies):
-            if b["name"].lower()==name.lower():
-                return j, b
-        raise ValueError(f"'{name}' not in bodies list")
-
-    def gravity_accel(self, pos: np.ndarray):
-        """
-        Total gravitational acceleration at point `pos` (AU).
-        Safe when pos coincides with a planet (skip that term).
-        """
-        a = np.zeros(2)
-        G = self.G
-
-        # Sun (origin)
-        r0 = -pos
-        dist3 = np.linalg.norm(r0) ** 3
-        a += G * self.star_mass * r0 / dist3
-
-        # Planets
-        pl_xy = self.get_positions()              # (N, 2)
-        rel    = pl_xy - pos                      # (N, 2)
-        dist3  = np.linalg.norm(rel, axis=1)**3
-        dist3  = np.where(dist3 == 0, np.inf, dist3)      # <= skip exact overlaps
-        a     += (self.G * self.masses[1:, None] * rel / dist3[:, None]).sum(axis=0)
-
-        return a
-
-
-    # ----------------  time stepping  ----------------
-    def step(self, dt_days: float = None):
-        """
-        Advance one stored frame.  If dt_days is given and differs from the
-        stored grid, we advance by the nearest integer frame(s).
-        """
-        if dt_days is None:
-            self.i = (self.i + 1) % self.N_steps
-        else:
-            k = int(round(dt_days / (self.t_arr[1]-self.t_arr[0])))
-            self.i = (self.i + k) % self.N_steps
-        return self.t_arr[self.i]
-
-    # convenience
-    def current_time(self): return self.t_arr[self.i]
-
-def build_sim(years=5, dt=1.0, system="systems/solar_system", elliptical=True):
-    # your existing loading + precompute code here, but *return* GravSim
-    folder = Path(system)
-    meta   = read_simple_kv(folder/"metadata.txt")
-    meta.setdefault("distance_unit","AU");  meta.setdefault("mass_unit","EarthMass")
-    meta.setdefault("angle_unit","deg")
-    sun   = load_sun(folder, meta)
-    bodies= load_bodies(folder, meta)
-
-    total_days = years*365
-    t_arr, traj = precompute(bodies, total_days, dt, sun["mass"], elliptical)
-    return GravSim(bodies, traj, t_arr, sun["mass"])
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 #   Main
