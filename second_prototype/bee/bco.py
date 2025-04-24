@@ -32,9 +32,10 @@ import numpy as np
 from rocket.sim import RocketSim
 from bee.viz   import save_fitness, animate_colony, plot_best
 
-EMPLOYED_FRAC = 0.5
-OUT_DIR = "bco_output"
-os.makedirs(OUT_DIR, exist_ok=True)
+# EMPLOYED_FRAC = 0.5
+# OUT_DIR = "bco_output"
+# os.makedirs(OUT_DIR, exist_ok=True)
+# OUT_DIR = None
 
 # ---------------------------------------------------------------------
 # CLI setup
@@ -57,12 +58,18 @@ def get_args():
                    help="total bees in colony")
     p.add_argument("--scout_frac", type=float, default=0.25,
                    help="fraction scouts vs employed/onlooker")
+    p.add_argument("--employed_frac", type=float, default=0.5,
+                help="fraction of non-scout bees that start as employed")
     p.add_argument("--speed",      type=float, default=30000,
                    help="max bee speed (km/h)")
     p.add_argument("--extra_food", type=int,   default=5,
                    help="extra random patches on dest orbit")
     p.add_argument("--epochs",     type=int,   default=1,
                    help="number of independent ABC runs")
+    p.add_argument("--out_root",   default="bco_output",
+                   help="where result folders are created")
+    p.add_argument("--skip_gif",   action="store_true",
+               help="don’t generate the animated GIF (still saves PNG & CSV)")
     return p.parse_args()
 
 # ---------------------------------------------------------------------
@@ -106,7 +113,7 @@ class BeeColony:
         self.N   = args.n_bees
         self.ns  = int(args.scout_frac * self.N)
         self.nr  = self.N - self.ns
-        self.ne  = int(EMPLOYED_FRAC * self.nr)
+        self.ne  = int(args.employed_frac * self.nr)
         self.no  = self.nr - self.ne
 
         # Velocity scaling (km/h → AU/day)
@@ -278,7 +285,7 @@ def main():
 
     # Output dir
     run_id  = f"{args.start}_{args.dest}_ABC_{args.n_bees}b"
-    out_dir = os.path.join(OUT_DIR, run_id)
+    out_dir = os.path.join(args.out_root, run_id)
     os.makedirs(out_dir, exist_ok=True)
 
     # epoch_fitness.csv
@@ -288,23 +295,28 @@ def main():
         w.writerows(epoch_rows)
 
     # summary.csv
+    tol = 2.0 * CLOSE_BONUS_RADIUS_AU
+    last_point = best_colony.global_best_path[-1]
+    solved = np.linalg.norm(last_point - best_colony.dest_pos) < tol
     with open(os.path.join(out_dir, "summary.csv"), "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["start", "dest", "n_bees", "epochs",
-                    "best_fit", "best_step", "path_len"])
+                    "best_fit", "best_step", "path_len", "solved"])
         w.writerow([args.start, args.dest, args.n_bees, args.epochs,
                     best_colony.global_best_fit,
                     best_colony.global_best_step,
-                    best_colony.global_best_len])
+                    best_colony.global_best_len,
+                    solved])
 
     # Time-series
     save_fitness(best_colony, os.path.join(out_dir, "fitness.csv"))
 
     # Visualisations
-    animate_colony(best_colony,
-                   fname="colony_best.gif",
-                   out_dir=out_dir,
-                   show_orbits=args.show_orbits)
+    if not args.skip_gif:
+        animate_colony(best_colony,
+                        fname="colony_best.gif",
+                        out_dir=out_dir,
+                        show_orbits=args.show_orbits)
 
     best_colony.best_path = best_colony.global_best_path
     plot_best(best_colony,
