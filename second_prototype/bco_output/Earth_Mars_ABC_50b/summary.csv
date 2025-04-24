@@ -1,2 +1,2 @@
-start,dest,n_bees,epochs,best_fit,path_length_AU,arrival_step
-Earth,Mars,50,1,-0.7447530719003903,11.69809626852449,730
+start,dest,n_bees,epochs,best_fit,best_step,path_len
+Earth,Mars,50,1,1.8845136066378585,157,2.5347954367641927
