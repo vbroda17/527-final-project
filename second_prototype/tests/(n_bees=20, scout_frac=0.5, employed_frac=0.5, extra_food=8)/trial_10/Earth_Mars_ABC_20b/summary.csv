@@ -1,0 +1,2 @@
+start,dest,n_bees,epochs,best_fit,best_step,path_len,solved
+Earth,Mars,20,1,4.0405397746246745,179,2.887741636819969,True
