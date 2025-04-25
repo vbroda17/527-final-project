@@ -1,0 +1,76 @@
+=== AVERAGE-BASED EXTREMES (per combo) ===
+
+--- Avg best fit ---
+combo: n_bees=75.0, scout_frac=0.25, employed_frac=0.75, extra_food=8.0
+  avg_fit:   4.471
+  avg_steps: 162.8
+  avg_path:  2.6
+
+--- Avg worst fit ---
+combo: n_bees=20.0, scout_frac=0.1, employed_frac=0.1, extra_food=5.0
+  avg_fit:   2.748
+  avg_steps: 83.5
+  avg_path:  1.5
+
+--- Avg fastest ---
+combo: n_bees=30.0, scout_frac=0.5, employed_frac=0.1, extra_food=8.0
+  avg_fit:   3.116
+  avg_steps: 62.0
+  avg_path:  1.4
+
+--- Avg slowest ---
+combo: n_bees=50.0, scout_frac=0.25, employed_frac=0.25, extra_food=0.0
+  avg_fit:   4.277
+  avg_steps: 164.3
+  avg_path:  2.7
+
+--- Avg shortest ---
+combo: n_bees=30.0, scout_frac=0.5, employed_frac=0.1, extra_food=8.0
+  avg_fit:   3.116
+  avg_steps: 62.0
+  avg_path:  1.4
+
+--- Avg longest ---
+combo: n_bees=50.0, scout_frac=0.25, employed_frac=0.25, extra_food=0.0
+  avg_fit:   4.277
+  avg_steps: 164.3
+  avg_path:  2.7
+
+=== SINGLE-RUN EXTREMES ===
+
+--- Best fit run ---
+n_bees=30, scout_frac=0.1, employed_frac=0.75, extra_food=3, trial=18
+  best_fit:   6.191
+  best_step:  156.0
+  path_len:   2.5
+
+--- Worst fit run ---
+n_bees=20, scout_frac=0.1, employed_frac=0.1, extra_food=5, trial=16
+  best_fit:   1.143
+  best_step:  65.0
+  path_len:   1.2
+
+--- Fastest run ---
+n_bees=20, scout_frac=0.5, employed_frac=0.1, extra_food=8, trial=6
+  best_fit:   2.792
+  best_step:  35.0
+  path_len:   1.4
+
+--- Slowest run ---
+n_bees=20, scout_frac=0.5, employed_frac=0.25, extra_food=3, trial=9
+  best_fit:   3.444
+  best_step:  193.0
+  path_len:   3.1
+
+--- Shortest run ---
+n_bees=75, scout_frac=0.5, employed_frac=0.1, extra_food=3, trial=19
+  best_fit:   3.182
+  best_step:  37.0
+  path_len:   1.0
+
+--- Longest run ---
+n_bees=20, scout_frac=0.5, employed_frac=0.25, extra_food=3, trial=9
+  best_fit:   3.444
+  best_step:  193.0
+  path_len:   3.1
+
