@@ -4,6 +4,26 @@ import matplotlib.pyplot as plt
 import numpy as np
 from itertools import combinations
 from pathlib import Path
+import matplotlib as mpl
+
+mpl.rcParams.update({
+    # Base font for text & annotations
+    'font.size':          20,       # default text
+    'font.family':        'serif',  # or 'sans-serif'
+    # Axes
+    'axes.titlesize':     24,       # main plot title
+    'axes.labelsize':     20,       # x/y axis labels
+    # Tick labels
+    'xtick.labelsize':    16,
+    'ytick.labelsize':    16,
+    # Legend
+    'legend.fontsize':    16,
+    # Figure title (if you use suptitle)
+    'figure.titlesize':   28,
+    # When you call plt.figure() without figsize, these defaults kick in:
+    'figure.figsize':     (12, 9),  # inches
+    'figure.dpi':         300,      # high‐res for printing
+})
 
 # ───── CONFIG ─────
 MASTER_CSV = Path("tests") / "master_results.csv"
@@ -18,28 +38,49 @@ BASE_DIR.mkdir(parents=True, exist_ok=True)
 REPORT_TXT.parent.mkdir(parents=True, exist_ok=True)
 
 
-def plot_and_save(df, x, y, metric, out_dir):
-    table = df.groupby([y, x])[metric].agg(AGG).unstack(x)
+def plot_and_save(df, x, y, metric, out_dir,
+                  cell_fontsize=12,  # ↑ make inner text bigger
+                  title_pad=15):     # ↑ extra space above title
+    table = df.groupby([y, x])[metric].mean().unstack(x)
     fig, ax = plt.subplots(figsize=(8, 6))
+
     im = ax.imshow(table.values, aspect="auto", origin="lower")
-    ax.set_xticks(np.arange(len(table.columns)))
-    ax.set_xticklabels(table.columns, rotation=45, ha="right")
-    ax.set_yticks(np.arange(len(table.index)))
-    ax.set_yticklabels(table.index)
     cb = fig.colorbar(im, ax=ax)
-    cb.set_label(f"{AGG} of {metric}")
+    cb.set_label(f"mean of {metric}", fontsize=cell_fontsize)
+
+    # ticks
+    ax.set_xticks(np.arange(len(table.columns)))
+    ax.set_xticklabels(table.columns, rotation=45, ha="right", fontsize=cell_fontsize)
+    ax.set_yticks(np.arange(len(table.index)))
+    ax.set_yticklabels(table.index, fontsize=cell_fontsize)
+
+    # annotations
     for i in range(table.shape[0]):
         for j in range(table.shape[1]):
-            ax.text(j, i, f"{table.iat[i, j]:.2f}",
-                    ha="center", va="center", fontsize=8)
-    ax.set_xlabel(x);  ax.set_ylabel(y)
-    ax.set_title(f"{AGG.capitalize()} of {metric}\nby {y} vs {x}")
-    plt.tight_layout()
+            ax.text(j, i,
+                    f"{table.iat[i, j]:.2f}",
+                    ha="center", va="center",
+                    fontsize=cell_fontsize,
+                    color="black" if im.norm(table.iat[i, j]) > 0.5 else "white")
 
+    # labels
+    ax.set_xlabel(x, fontsize=cell_fontsize + 4)
+    ax.set_ylabel(y, fontsize=cell_fontsize + 4)
+
+    # title with padding
+    ax.set_title(f"Mean {metric}\nby {y} vs {x}",
+                 pad=title_pad,  # ↑ move it up
+                 fontsize=cell_fontsize + 6)
+
+    # make room for the title
+    plt.tight_layout(rect=[0, 0, 1, 0.94])
+
+    # save
     out_path = out_dir / f"{y}_vs_{x}.png"
     fig.savefig(out_path, dpi=300)
     plt.close(fig)
-    print(f"Saved {metric}/{y}_vs_{x}.png")
+    print(f"Saved heatmap: {out_path}")
+
 
 
 def compute_extremes(df):
@@ -246,24 +287,90 @@ def generate_line_plots(master_csv: Path):
                                x_param, hue_param,
                                mean_c, min_c, max_c,
                                ylabel,
-                               fixed,      # <-- pass it in
+                               fixed,
                                out_file)
+                
+def plot_non_solved_counts(df_all: pd.DataFrame,
+                           param: str,
+                           defaults: dict,
+                           values_list: list,
+                           mode: str = "default",
+                           out_file: Path | None = None):
+    """
+    Bars = number of runs where solved==0, for each value in values_list,
+    holding other params at defaults (mode='default') or aggregating all (mode='aggregate').
+    """
+    # 1) filter non-solved
+    df_ns = df_all[df_all["solved"] == 0]
+    if mode == "default":
+        for p, v in defaults.items():
+            if p != param:
+                df_ns = df_ns[df_ns[p] == v]
+
+    # 2) count & reindex
+    counts = df_ns.groupby(param).size().reindex(values_list, fill_value=0)
+
+    # 3) categorical positions for uniform spacing
+    positions = np.arange(len(values_list))
+    width = 0.6
+
+    # 4) plot
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.bar(positions, counts.values, width=width)
+    ax.set_xticks(positions)
+    ax.set_xticklabels(values_list, fontsize=12)
+    ax.tick_params(axis='y', labelsize=12)
+    ax.set_xlabel(param, fontsize=16)
+    ax.set_ylabel("Non-solved run count", fontsize=16)
+
+    title = f"Non-solved Runs vs {param}"
+    title += " (defaults)" if mode=="default" else " (aggregated)"
+    ax.set_title(title, fontsize=18)
+
+    # 5) tighten things up
+    ax.margins(x=0.05)                    # small padding on left/right
+    plt.tight_layout(pad=0.5)            # less white space around figure
+
+    # 6) save or show
+    if out_file:
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_file, dpi=300)
+        print(f"Saved: {out_file}")
+    else:
+        plt.show()
+
+    plt.close(fig)
 
 def main():
     df = pd.read_csv(MASTER_CSV)
-
+    df_solved = df[df["solved"] == 1].copy()
     # Heatmaps
     # for metric in METRICS:
     #     metric_dir = BASE_DIR / metric
     #     metric_dir.mkdir(parents=True, exist_ok=True)
     #     for x_param, y_param in combinations(PARAMS, 2):
-    #         plot_and_save(df, x_param, y_param, metric, metric_dir)
+    #         plot_and_save(df_solved, x_param, y_param, metric, metric_dir)
 
     # Line plots
-    generate_line_plots(MASTER_CSV)
+    # generate_line_plots(MASTER_CSV)
+    out_dir = Path("results/non")
+    params_to_plot = [
+        ("n_bees",        N_BEES_LIST),
+        ("scout_frac",    SCOUT_FRAC_LIST),
+        ("employed_frac", EMPLOYED_FRAC_LIST),
+    ]
+    for param, values in params_to_plot:
+        # default‐mode
+        # out_def = out_dir / f"{param}_non_solved_default.png"
+        # plot_non_solved_counts(df, param, DEFAULTS, values,
+        #                        mode="default", out_file=out_def)
 
+        # aggregate‐mode
+        out_agg = out_dir / f"{param}_non_solved_aggregate.png"
+        plot_non_solved_counts(df, param, DEFAULTS, values,
+                               mode="aggregate", out_file=out_agg)
 
-    # Reports
+    # # Reports
     # avgs = compute_extremes(df)
     # runs = compute_run_extremes(df)
     # write_report(avgs, runs, REPORT_TXT)
