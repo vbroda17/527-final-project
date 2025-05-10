@@ -13,13 +13,10 @@ Adjustable constants (feel free to tune):
     CLOSE_BONUS_SCALE     – additive reward when inside that radius
 """
 
-# ─────────────────────────────────────────────────────────────
-# Tunables for the new behaviour  ←—  tweak these three numbers
-# ─────────────────────────────────────────────────────────────
+# Tunables for the new behaviour
 PATH_THRESH_FACTOR    = 1.20   # 1) path-length tolerance (× straight-line)
 CLOSE_BONUS_RADIUS_AU = 0.05   # 2) “very close” radius around destination
 CLOSE_BONUS_SCALE     = 5.0    # 3) bonus added when inside that radius
-# ─────────────────────────────────────────────────────────────
 
 import os
 import argparse
@@ -37,9 +34,7 @@ from bee.viz   import save_fitness, animate_colony, plot_best
 # os.makedirs(OUT_DIR, exist_ok=True)
 # OUT_DIR = None
 
-# ---------------------------------------------------------------------
 # CLI setup
-# ---------------------------------------------------------------------
 def get_args():
     p = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
@@ -72,9 +67,7 @@ def get_args():
                help="don’t generate the animated GIF (still saves PNG & CSV)")
     return p.parse_args()
 
-# ---------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------
 def start_pos(sim, start):
     """Return initial position/velocity given a body name or x,y string."""
     if isinstance(start, str) and ',' not in start:
@@ -87,9 +80,7 @@ def start_pos(sim, start):
         v0     = np.zeros(2)
     return r0, v0
 
-# ---------------------------------------------------------------------
 # Bee container
-# ---------------------------------------------------------------------
 class Bee:
     def __init__(self, pos, angle, speed_AUd):
         self.r           = pos.copy()
@@ -102,9 +93,7 @@ class Bee:
         self.role        = None
         self.finished    = False   # stop updating once arrived
 
-# ---------------------------------------------------------------------
 # Bee Colony (single epoch)
-# ---------------------------------------------------------------------
 class BeeColony:
     def __init__(self, args):
         self.args = args
@@ -167,9 +156,7 @@ class BeeColony:
         self.global_best_len  = 0.0
         self.global_best_path = None
 
-    # ----------------------------------------------------------
     # Physics + fitness for a single bee
-    # ----------------------------------------------------------
     def step_bee(self, b):
         if b.finished:
             return
@@ -188,7 +175,7 @@ class BeeColony:
         # Grow path length
         b.path_length += np.linalg.norm(b.r - prev)
 
-        # ---------- FITNESS ----------
+        # FITNESS 
         # (1) angular/orbit proximity
         dists   = np.linalg.norm(self.orbit - b.r, axis=1)
         i_near  = int(np.argmin(dists))
@@ -215,9 +202,7 @@ class BeeColony:
 
         b.path.append(b.r.copy())
 
-    # ----------------------------------------------------------
     # Main colony loop
-    # ----------------------------------------------------------
     def run(self):
         steps = int(self.args.years * 365.0 / self.args.dt)
         for step in range(steps):
@@ -262,9 +247,7 @@ class BeeColony:
             if self.args.move_planets:
                 self.sim.grav.step()
 
-# ---------------------------------------------------------------------
 # Driver (multi-epoch)
-# ---------------------------------------------------------------------
 def main():
     args = get_args()
 

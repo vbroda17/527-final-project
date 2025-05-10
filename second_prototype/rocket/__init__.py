@@ -31,13 +31,13 @@ class Rocket:
         self.path = [self.r.copy()]
         self.landed = False
 
-    # ---------------- internal helpers ----------------
+    # internal helpers
     def _a_thrust(self):
         """Engine acceleration vector [AU/day²] for current throttle & angle."""
         a_mag = (self.max_thrust * self.throttle) / self.mass     # AU/day²
         return a_mag * np.array([np.cos(self.angle), np.sin(self.angle)])
 
-    # ---------------- main integrator -----------------
+    # main integrator 
     def step(self, dt):
         if self.landed:
             self.path.append(self.r.copy())

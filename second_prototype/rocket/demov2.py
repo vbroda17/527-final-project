@@ -18,12 +18,12 @@ from types import SimpleNamespace
 from rocket.sim import RocketSim
 from rocket import viz
 
-# ─────────────────────────────────────────────────────────── global knobs
+# global knobs
 RUN_YEARS = 3.5                   # length of each sim
 DT        = .5                    # days per step
 OUT_DIR   = "rocket_output"
 
-# ─────────────────────────────────────────────────────────── helpers
+# helpers
 def start_pos(sim, start):
     if isinstance(start, str):
         idx,_ = sim.grav.get_body(start)
@@ -38,7 +38,7 @@ def add_ship(sim, start, vmax_kmh=30_000, mass=2.0, max_thrust=1e-3):
     return sim.add_rocket(r0,v0,mass=mass,max_thrust=max_thrust,
                           max_v_kmh=vmax_kmh)
 
-# controllers -----------------------------------------------------------
+# controllers
 def retrograde(throttle=1.0):
     def c(_, rk, __):
         if np.allclose(rk.v,0): return 0.0, rk.angle
@@ -86,7 +86,7 @@ def no_grav_const(body, speed_kmh=30_000):
         return ctrl
     return factory
 
-# ─────────────────────────────────────────────────────────── DEMOS
+# DEMOS
 def demo_single_ship(start="Earth", dest="Mars"):
     sim  = RocketSim(years=RUN_YEARS, dt=DT)
     rk   = add_ship(sim,start)
@@ -126,7 +126,7 @@ def demo_no_gravity_ship(start="Earth", dest="Mars"):
     sim.run(int(RUN_YEARS*365/DT), ctrl)
     viz.animate(sim,rk,fname=f"no_grav.gif")
 
-# ─────────────────────────────────────────────────────────── MAIN
+# MAIN
 def main():
     os.makedirs(OUT_DIR,exist_ok=True)
 

@@ -9,13 +9,13 @@ class RocketSim:
         self.dt   = dt
         self.rockets = []
 
-    # ── add rockets ─────────────────────────────────────────────
+    # add rockets
     def add_rocket(self, r0, v0, mass, max_thrust, max_v_kmh):
         rk = Rocket(r0, v0, mass, max_thrust, max_v_kmh, self)
         self.rockets.append(rk)
         return rk
 
-    # ── loop ────────────────────────────────────────────────────
+    # loop
     def run(self, n_steps, controller, progress=True):
         rng = tqdm(range(n_steps)) if progress else range(n_steps)
         for step in rng:

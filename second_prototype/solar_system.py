@@ -27,9 +27,7 @@ from matplotlib.animation import FuncAnimation
 from tqdm.auto import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-# ──────────────────────────────────────────────────────────────────────────────
 #   Unit conversion helpers
-# ──────────────────────────────────────────────────────────────────────────────
 AU_KM          = 1.495_978_707e8          # km
 EARTH_MASS_KG  = 5.9722e24
 SOLAR_MASS_EM  = 332_946.0
@@ -42,10 +40,7 @@ kms_to_AUday   = DAY_S / AU_KM
 AUday_to_kms   = AU_KM / DAY_S
 mps2_to_AUday2 = (DAY_S**2) / (AU_KM*1e3)
 
-# ──────────────────────────────────────────────────────────────────────────────
 #   File IO helpers
-# ──────────────────────────────────────────────────────────────────────────────
-
 def read_simple_kv(path: Path) -> Dict[str,str]:
     d = {}
     with path.open() as f:
@@ -57,7 +52,6 @@ def read_simple_kv(path: Path) -> Dict[str,str]:
     return d
 
 # Conversion functions
-
 def dist_to_au(val: float, unit: str) -> float:
     u = unit.lower()
     if u.startswith("au"):  return val
@@ -78,10 +72,7 @@ def angle_to_rad(val: float, unit: str) -> float:
     if u.startswith("deg"): return val * DEG2RAD
     raise ValueError(f"unknown angle unit '{unit}'")
 
-# ──────────────────────────────────────────────────────────────────────────────
 #   Load axis data
-# ──────────────────────────────────────────────────────────────────────────────
-
 def load_sun(folder: Path, meta: Dict[str,str]):
     d = read_simple_kv(folder / "sun.txt")
     mass_u   = d.get("mass_unit",   meta.get("mass_unit","EarthMass"))
@@ -90,7 +81,6 @@ def load_sun(folder: Path, meta: Dict[str,str]):
         "mass":   mass_to_earth(float(d["mass"]), mass_u),
         "radius": dist_to_au   (float(d["radius"]), radius_u),
     }
-
 
 def load_bodies(folder: Path, meta: Dict[str,str]) -> List[Dict]:
     bodies = []
@@ -112,9 +102,7 @@ def load_bodies(folder: Path, meta: Dict[str,str]) -> List[Dict]:
             })
     return bodies
 
-# ──────────────────────────────────────────────────────────────────────────────
 #   Orbit maths & parallel precompute
-# ──────────────────────────────────────────────────────────────────────────────
 G_AU3_EM_day2 = 6.67430e-11 * DAY_S**2 / (AU_KM*1000)**3 * EARTH_MASS_KG
 
 def elements(body: Dict):
@@ -168,9 +156,7 @@ def precompute(bodies, total_days, dt, M_central, elliptical):
             traj[futures[fut]] = fut.result()
     return t_arr, traj
 
-# ──────────────────────────────────────────────────────────────────────────────
 #   GravSim class wrapping precomputed trajectories
-# ──────────────────────────────────────────────────────────────────────────────
 class GravSim:
     def __init__(self, bodies, traj, t_arr, star_mass):
         self.bodies = bodies
@@ -204,9 +190,7 @@ class GravSim:
         return self.t_arr[self.i]
     def current_time(self): return self.t_arr[self.i]
 
-# ──────────────────────────────────────────────────────────────────────────────
 #   build_sim with cache validation
-# ──────────────────────────────────────────────────────────────────────────────
 def build_sim(years:float=5.0, dt:float=1.0, system:str="systems/solar_system", elliptical:bool=True) -> GravSim:
     folder = Path(system)
     meta = read_simple_kv(folder/"metadata.txt")
@@ -245,9 +229,7 @@ def build_sim(years:float=5.0, dt:float=1.0, system:str="systems/solar_system", 
 
     return GravSim(bodies, traj, t_arr, sun['mass'])
 
-# ──────────────────────────────────────────────────────────────────────────────
 #   Plotting & animation
-# ──────────────────────────────────────────────────────────────────────────────
 def static_overview(ax, bodies, traj0, elliptical):
     cmap   = plt.cm.plasma
     colors = cmap(np.linspace(0.15, 0.95, len(bodies)))
@@ -287,7 +269,7 @@ def animate(bodies, t_arr, traj, elliptical, save=False):
     prev_phi = np.zeros(len(bodies))                    # previous wrapped φ
     counter  = np.zeros(len(bodies), dtype=int)         # integer orbits
 
-    # ── Figure and static backdrop ───────────────────────────────────────
+    # Figure and static backdrop
     fig, ax = plt.subplots(figsize=(6, 6), facecolor="k")
     fig.patch.set_facecolor("k");  ax.set_facecolor("k")
     static_overview(ax, bodies, start_xy, elliptical)   # shows hollow ring
@@ -298,7 +280,7 @@ def animate(bodies, t_arr, traj, elliptical, save=False):
                        ha="center", va="center", zorder=6)
                for xy in start_xy]
 
-    # ── animator helpers ────────────────────────────────────────────────
+    # animator helpers
     def init():
         for m, t in zip(movers, trails):
             m.set_data([], [])
@@ -332,9 +314,7 @@ def animate(bodies, t_arr, traj, elliptical, save=False):
 
     plt.show()
 
-# ──────────────────────────────────────────────────────────────────────────────
 #   Main
-# ──────────────────────────────────────────────────────────────────────────────
 def main():
     ap=argparse.ArgumentParser(epilog="example: python solar_system.py --ellipse --years 10")
     mode=ap.add_mutually_exclusive_group()
